@@ -1,0 +1,740 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Alife.Foundation;
+using Alife.Framework;
+using Alife.Function.FunctionCaller;
+using ElectronNET.API;
+using Microsoft.Extensions.Logging;
+
+namespace presents.Wallpaper;
+
+/// <summary>
+/// Alife 界面背景壁纸：扫描本机 Wallpaper Engine 壁纸，注入到 Alife 主窗口的 Blazor 页面里，
+/// 作为聊天界面的背景层，并把这些能力暴露成 AI 可调用的 XML 函数。
+/// </summary>
+[Module("wallpaper壁纸",
+    "把 Wallpaper Engine 的视频 / 网页壁纸作为 Alife 界面背景：自动扫描 Steam 创意工坊与本地项目，支持轮播，并可让 AI 按情绪 / 标签切换壁纸。",
+    defaultCategory: "presents/窗口美化")]
+public sealed class WallpaperModule(
+    PluginSystem pluginSystem,
+    XmlFunctionCaller functionCaller,
+    StorageSystem storage,
+    ConfigurationSystem configurationSystem,
+    ILogger<WallpaperModule> logger,
+    Interactor<WallpaperModule> interactor) : ChatBehaviour, IConfigurable<WallpaperConfig>
+{
+    public WallpaperConfig Configuration { get; set; } = null!;
+
+    readonly WallpaperCatalog catalog = new();
+    LocalStaticServer? server;
+    AlifeBackground? background;
+    XmlHandler? handler;
+    WallpaperItem? current;
+    int index = -1;
+    long lastRotation;
+    long lastHealthCheck;
+    bool rotating;
+    bool checking;
+    string pluginDirectory = "";
+
+    const string LastWallpaperKey = "presents.Wallpaper/Last";
+
+    protected override Task OnAwake()
+    {
+        try
+        {
+            pluginDirectory = pluginSystem.PluginContext.GetPluginDirectoryPath("presents.Wallpaper");
+            WallpaperProps.Store.Init(pluginDirectory);
+            catalog.Refresh(Configuration);
+            server = new LocalStaticServer(Path.Combine(pluginDirectory, "Resources", "wwwroot"));
+            server.ApiHandler = HandleApiAsync;
+            server.PreviewResolver = ResolvePreview;
+            server.WebPropsProvider = BuildWebPropsJson;
+
+            // 端口写进临时目录，方便本机排查（/api/state、/api/dom）
+            try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "alife-wallpaper.port"), server.Port.ToString()); } catch { }
+            background = new AlifeBackground(logger);
+
+            logger.LogInformation("[WallpaperEngine] 壁纸库：{Summary}；静态服务 {Url}", catalog.LastSummary, server.BaseUrl);
+
+            handler = new XmlHandler(this)
+            {
+                Description = "控制 Alife 界面背景壁纸：按关键词或标签切换、下一张/上一张、列出壁纸库与标签、查询当前壁纸、停止显示、重新扫描。"
+            };
+            functionCaller.RegisterHandler(handler, DocumentMode.Implicit, cancellationToken: DestroyCancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "[WallpaperEngine] 初始化失败");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    protected override async Task OnStart()
+    {
+        // 无论是否自动启用，都先清掉旧版本留在桌面上的窗口
+        await CleanupLegacyWindowsAsync();
+
+        if (!Configuration.AutoStart) return;
+
+        try
+        {
+            if (catalog.Count == 0) catalog.Refresh(Configuration);
+
+            WallpaperItem? item = null;
+
+            if (!string.IsNullOrWhiteSpace(Configuration.DefaultWallpaper))
+                item = catalog.Find(Configuration.DefaultWallpaper);
+
+            if (item == null && Configuration.RestoreLast)
+            {
+                string? lastId = null;
+                try { lastId = storage.GetObject<string>(LastWallpaperKey); } catch { }
+                if (!string.IsNullOrWhiteSpace(lastId)) item = catalog.Find(lastId);
+            }
+
+            // 只有「没有任何记录」时才优先视频/网页，避免首次启动只显示场景预览图。
+            // 注意：DefaultWallpaper / RestoreLast 命中的那张，哪怕 playable=false（场景壁纸）也要原样恢复——
+            // 场景壁纸开着实时渲染（LiveScene）时本来就是动的，不能因为它有封面图就把用户选的换掉。
+            // 之前这里无条件换成第一张可播放壁纸，导致每次重载都跳回同一张视频，看起来像"选择没被保存"。
+            if (item == null) item = catalog.Items.FirstOrDefault(x => x.IsPlayable);
+            if (item == null && catalog.Count > 0) item = catalog.Items[0];
+
+            if (item != null)
+            {
+                await PlayAsync(item);
+            }
+            else
+            {
+                logger.LogWarning("[WallpaperEngine] 没有找到可用壁纸；请在 Wallpaper Engine 订阅壁纸，或在模块设置里添加额外目录");
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "[WallpaperEngine] 自动启动壁纸失败");
+        }
+    }
+
+    protected override Task OnUpdate()
+    {
+        long now = Environment.TickCount64;
+
+        // 页面重载 / F5 后注入的层会消失，这里做一次轻量自愈
+        if (current != null && !checking && now - lastHealthCheck >= 1500)
+        {
+            lastHealthCheck = now;
+            checking = true;
+            _ = CheckAliveAsync();
+        }
+
+        if (Configuration.RotationMinutes <= 0 || catalog.Count < 2 || rotating || current == null)
+            return Task.CompletedTask;
+
+        if (lastRotation == 0)
+        {
+            lastRotation = now;
+            return Task.CompletedTask;
+        }
+
+        if (now - lastRotation < Configuration.RotationMinutes * 60000L)
+            return Task.CompletedTask;
+
+        rotating = true;
+        _ = RotateAsync();
+        return Task.CompletedTask;
+    }
+
+    async Task CheckAliveAsync()
+    {
+        try
+        {
+            if (background == null || current == null) return;
+            if (await background.IsLayerAliveAsync()) return;
+
+            logger.LogInformation("[WallpaperEngine] 界面背景层丢失，重新注入");
+            await background.ShowAsync(current, Configuration, server!.BaseUrl);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("[WallpaperEngine] 背景自愈失败：" + ex.Message);
+        }
+        finally
+        {
+            checking = false;
+        }
+    }
+
+    async Task RotateAsync()
+    {
+        try { await StepAsync(1); }
+        catch (Exception ex) { logger.LogWarning("[WallpaperEngine] 自动轮播失败：" + ex.Message); }
+        finally { rotating = false; }
+    }
+
+    protected override async Task OnDestroy()
+    {
+        try
+        {
+            if (handler != null) functionCaller.UnregisterHandler(handler);
+        }
+        catch { }
+
+        try
+        {
+            if (background != null) await background.ClearAsync();
+        }
+        catch { }
+
+        try { server?.Dispose(); } catch { }
+        server = null;
+
+        try { File.Delete(Path.Combine(Path.GetTempPath(), "alife-wallpaper.port")); } catch { }
+    }
+
+    // ---------------- 运行逻辑 ----------------
+
+    async Task EnsureBackgroundAsync()
+    {
+        if (server == null) throw new InvalidOperationException("壁纸静态服务未就绪，请重载插件");
+
+        background ??= new AlifeBackground(logger);
+        await background.AttachAsync();
+    }
+
+    async Task PlayAsync(WallpaperItem item)
+    {
+        await EnsureBackgroundAsync();
+
+        server!.SetWallpaperRoot(item.Root);
+        current = item;
+        index = catalog.IndexOf(item);
+        lastRotation = Environment.TickCount64;
+
+        await background!.ShowAsync(item, Configuration, server.BaseUrl);
+        try { storage.SetObject(LastWallpaperKey, item.Id); } catch { }
+
+        logger.LogInformation("[WallpaperEngine] 界面背景 → {Title}（{Type} / {Source}）", item.Title, item.Type, item.Source);
+    }
+
+    async Task StopAsync(bool keepWidget = false)
+    {
+        if (background != null) await background.ClearAsync(keepWidget);
+        current = null;
+        index = -1;
+        server?.SetWallpaperRoot(null);
+    }
+
+    async Task StepAsync(int delta)
+    {
+        if (catalog.Count == 0) catalog.Refresh(Configuration);
+
+        WallpaperItem? item = catalog.Step(index, delta);
+        if (item == null)
+        {
+            interactor.Poke("壁纸库为空：请先在 Wallpaper Engine 订阅壁纸，或在模块设置里添加额外壁纸目录。");
+            return;
+        }
+
+        await PlayAsync(item);
+        interactor.Poke($"已切换到壁纸：{item.Title}（{item.Type}）。");
+    }
+
+    /// <summary>清理旧版本创建的桌面壁纸窗口（Title=AlifeWallpaperEngine），不再占用桌面。</summary>
+    async Task CleanupLegacyWindowsAsync()
+    {
+        try
+        {
+            foreach (BrowserWindow window in Electron.WindowManager.BrowserWindows.ToList())
+            {
+                string title;
+                try { title = await window.GetTitleAsync(); } catch { continue; }
+                if (!string.Equals(title, "AlifeWallpaperEngine", StringComparison.OrdinalIgnoreCase)) continue;
+
+                logger.LogInformation("[WallpaperEngine] 清理旧版桌面壁纸窗口");
+                try { window.Destroy(); } catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("[WallpaperEngine] 清理旧窗口失败：" + ex.Message);
+        }
+    }
+
+    // ---------------- 挂件 HTTP API ----------------
+
+    /// <summary>把内存里的配置写回存储，否则重载插件 / 重启后挂件调的参数会丢。</summary>
+    void PersistConfig()
+    {
+        try
+        {
+            configurationSystem.SetConfiguration(GetType(), Configuration, Character.StorageKey);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("[WallpaperEngine] 保存配置失败：" + ex.Message);
+        }
+    }
+
+    /// <summary>网页壁纸入口 HTML 里要带的属性种子（只带用户改过的值）。</summary>
+    string BuildWebPropsJson()
+    {
+        if (current == null) return "{}";
+        if (!string.Equals(current.Type, "web", StringComparison.OrdinalIgnoreCase)) return "{}";
+
+        try
+        {
+            var props = WallpaperProps.Resolve(current, WallpaperProps.Store.Get(current.Id));
+            // 网页壁纸拿到的也是 WE 的 { value, type } 形状（页面里读 p.xxx.value）
+        return JsonSerializer.Serialize(WallpaperProps.NativeNodes(props));
+        }
+        catch
+        {
+            return "{}";
+        }
+    }
+
+    string? ResolvePreview(string id)
+    {
+        WallpaperItem? item = catalog.Find(id);
+        if (item == null || string.IsNullOrEmpty(item.Preview)) return null;
+
+        try
+        {
+            string full = Path.Combine(item.Root, item.Preview.Replace('/', Path.DirectorySeparatorChar));
+            return File.Exists(full) ? full : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    async Task<string> HandleApiAsync(string path, string query)
+    {
+        Dictionary<string, string> args = ParseQuery(query);
+
+        switch (path.TrimEnd('/').ToLowerInvariant())
+        {
+            case "/api/state":
+            {
+                // 实时渲染到底起没起来：起不来时页面只剩预览图，调什么都像"没反应"
+                string scene = background == null ? "" : await background.EvalAsync("window.__alifeWpScene ? 'up' : 'down'");
+                return BuildStateJson("", scene.Trim() == "up" ? "up" : "down");
+            }
+
+            case "/api/switch":
+            {
+                WallpaperItem? item = catalog.Find(args.GetValueOrDefault("id"));
+                if (item == null) return "{\"ok\":false,\"error\":\"没有找到这张壁纸\"}";
+
+                await PlayAsync(item);
+                return BuildStateJson();
+            }
+
+            case "/api/step":
+            {
+                int delta = args.TryGetValue("delta", out string? raw) && int.TryParse(raw, out int step) ? step : 1;
+                await StepAsync(delta);
+                return BuildStateJson();
+            }
+
+            case "/api/dom":
+            {
+                if (background == null) return "{\"ok\":false,\"error\":\"背景层未初始化\"}";
+
+                string dump = await background.DumpDomAsync();
+                return string.IsNullOrWhiteSpace(dump) ? "{\"ok\":false,\"error\":\"页面未就绪\"}" : dump;
+            }
+
+            // 实时渲染退回预览图后重新挂载（面板上的「重新挂载」按钮）
+            case "/api/remount":
+            {
+                if (background == null) return "{\"ok\":false,\"error\":\"背景层未初始化\"}";
+                return await background.RemountSceneAsync();
+            }
+
+            // 本机排查：场景运行时状态（脚本报错 / 跳过的脚本 / 当前属性值）
+            case "/api/scene":
+            {
+                if (background == null) return "{\"ok\":false,\"error\":\"背景层未初始化\"}";
+                return await background.SceneDiagAsync();
+            }
+
+            // 本机排查：在页面里执行任意 JS
+            case "/api/eval":
+            {
+                if (background == null) return "{\"ok\":false,\"error\":\"背景层未初始化\"}";
+
+                string js = args.GetValueOrDefault("js") ?? "";
+                if (js.Length == 0) return "{\"ok\":false,\"error\":\"缺少 js\"}";
+
+                return await background.EvalAsync(js);
+            }
+
+            case "/api/config":
+            {
+                if (args.TryGetValue("opacity", out string? op) && int.TryParse(op, out int o))
+                    Configuration.Opacity = Math.Clamp(o, 0, 100);
+                if (args.TryGetValue("blur", out string? bl) && int.TryParse(bl, out int b))
+                    Configuration.Blur = Math.Clamp(b, 0, 30);
+                if (args.TryGetValue("panel", out string? pa) && int.TryParse(pa, out int p))
+                    Configuration.PanelOpacity = Math.Clamp(p, 0, 100);
+                if (args.TryGetValue("white", out string? wh) && wh.Length > 0)
+                    Configuration.WhiteScrim = wh == "1" || wh.Equals("true", StringComparison.OrdinalIgnoreCase);
+                if (args.TryGetValue("br", out string? br) && int.TryParse(br, out int bv))
+                    Configuration.Brightness = Math.Clamp(bv, 0, 200);
+                if (args.TryGetValue("ct", out string? ct) && int.TryParse(ct, out int cv))
+                    Configuration.Contrast = Math.Clamp(cv, 0, 200);
+                if (args.TryGetValue("sa", out string? sa) && int.TryParse(sa, out int sv))
+                    Configuration.Saturate = Math.Clamp(sv, 0, 200);
+                if (args.TryGetValue("bu", out string? bu) && int.TryParse(bu, out int buv))
+                    Configuration.BubbleOpacity = Math.Clamp(buv, 0, 100);
+                if (args.TryGetValue("px", out string? px) && int.TryParse(px, out int pxv))
+                    Configuration.Parallax = Math.Clamp(pxv, 0, 100);
+                // 挂件设置面板自己的不透明度（跟页面卡片的「白度」 / panel 互不影响）
+                if (args.TryGetValue("wpo", out string? wp) && int.TryParse(wp, out int wpv))
+                    Configuration.WidgetPanelOpacity = Math.Clamp(wpv, 0, 100);
+
+                // 声音类参数只改 <video>，不碰样式层
+                bool media = false;
+                if (args.TryGetValue("vol", out string? vo) && int.TryParse(vo, out int vv))
+                {
+                    Configuration.Volume = Math.Clamp(vv, 0, 100);
+                    media = true;
+                }
+                if (args.TryGetValue("rate", out string? rt) && int.TryParse(rt, out int rv))
+                {
+                    Configuration.PlaybackRate = Math.Clamp(rv, 50, 200);
+                    media = true;
+                }
+                if (args.TryGetValue("mute", out string? mu) && mu.Length > 0)
+                {
+                    Configuration.Mute = mu == "1" || mu.Equals("true", StringComparison.OrdinalIgnoreCase);
+                    media = true;
+                }
+
+                bool restyle = args.ContainsKey("opacity") || args.ContainsKey("blur") || args.ContainsKey("panel")
+                    || args.ContainsKey("white") || args.ContainsKey("br") || args.ContainsKey("ct")
+                    || args.ContainsKey("sa") || args.ContainsKey("bu") || args.ContainsKey("px");
+
+                PersistConfig();
+                if (background != null)
+                {
+                    if (restyle) await background.RestyleAsync(Configuration);
+                    if (media) await background.ApplyMediaAsync(Configuration);
+                }
+                return BuildStateJson();
+            }
+
+            // 挂件拖动后的位置。x / y = -1 表示归位到默认右下角
+            case "/api/move":
+            {
+                int x = args.TryGetValue("x", out string? xs) && int.TryParse(xs, out int xv) ? xv : -1;
+                int y = args.TryGetValue("y", out string? ys) && int.TryParse(ys, out int yv) ? yv : -1;
+
+                Configuration.WidgetX = x < 0 ? -1 : x;
+                Configuration.WidgetY = y < 0 ? -1 : y;
+                PersistConfig();
+                // 只回答 ok：拖动结束时每拖一次都回传整份列表没必要
+                return "{\"ok\":true}";
+            }
+
+            case "/api/prop":
+            {
+                if (current == null) return "{\"ok\":false,\"error\":\"当前没有壁纸\"}";
+
+                string name = args.GetValueOrDefault("name") ?? "";
+                string raw = args.GetValueOrDefault("value") ?? "";
+                bool reset = IsTrue(args.GetValueOrDefault("reset"));
+
+                // 作者默认值（不吃用户覆盖）：还原时必须把它推回正在跑的场景，
+                // 光删存档的话场景里还留着上一次调的值
+                List<WallpaperProps.Prop> defaults = WallpaperProps.Resolve(current, null);
+                Dictionary<string, object?> push;
+
+                if (reset && name.Length == 0)
+                {
+                    // 全部还原：先看改过哪些，再清存档，然后逐个推回默认值
+                    Dictionary<string, string>? old = WallpaperProps.Store.Get(current.Id);
+                    WallpaperProps.Store.Clear(current.Id);
+
+                    push = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    if (old != null)
+                    {
+                        foreach (string key in old.Keys)
+                        {
+                            WallpaperProps.Prop? def = WallpaperProps.Find(defaults, key);
+                            if (def != null && def.Value != null) push[def.Name] = WallpaperProps.Node(def);
+                        }
+                    }
+                }
+                else
+                {
+                    if (name.Length == 0) return "{\"ok\":false,\"error\":\"缺少属性名\"}";
+
+                    if (reset)
+                    {
+                        // 单个还原：只把这一条的默认值推回去，别人的值不动
+                        WallpaperProps.Store.Remove(current.Id, name);
+
+                        push = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                        WallpaperProps.Prop? def = WallpaperProps.Find(defaults, name);
+                        if (def != null && def.Value != null) push[def.Name] = WallpaperProps.Node(def);
+                    }
+                    else
+                    {
+                        try { using JsonDocument probe = JsonDocument.Parse(raw); }
+                        catch { return "{\"ok\":false,\"error\":\"属性值不是合法 JSON\"}"; }
+
+                        WallpaperProps.Store.Set(current.Id, name, raw);
+
+                        // 只推这一条：拖滑条时每帧都推全量会把贴图属性反复重载
+                        push = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                        WallpaperProps.Prop? one = WallpaperProps.Find(defaults, name);
+                        if (one != null && WallpaperProps.TryNode(raw, one.Kind, out Dictionary<string, object?>? node))
+                            push[one.Name] = node;
+
+                        if (push.Count == 0)
+                        {
+                            // 名字对不上（作者改过属性名 / 存档里是脏数据）时退回全量
+                            push = WallpaperProps.NativeNodes(WallpaperProps.Resolve(current, WallpaperProps.Store.Get(current.Id)));
+                        }
+                    }
+                }
+
+                string applied = background == null ? "no-window" : await background.ApplyPropsAsync(push);
+                return BuildStateJson(applied);
+            }
+
+            case "/api/clear":
+            {
+                // 用户点“清除壁纸”：只撤壁纸层，保留右下角挂件，否则挂件没了就再也叫不回来
+                await StopAsync(keepWidget: true);
+                return BuildStateJson();
+            }
+        }
+
+        return "{\"ok\":false,\"error\":\"unknown api\"}";
+    }
+
+    /// <param name="applied">上一次属性改动在页面侧的落点（scene / web / no-scene / scripts-off），给挂件提示用。</param>
+    /// <param name="scene">实时渲染是否在跑：up / down（down = 页面只有预览图，调属性看不到变化）。</param>
+    string BuildStateJson(string applied = "", string scene = "")
+    {
+        string? currentId = current?.Id;
+        string baseUrl = server?.BaseUrl ?? "";
+
+        var items = catalog.Items.Select(x => new
+        {
+            id = x.Id,
+            title = x.Title,
+            type = x.Type,
+            playable = x.IsPlayable,
+            current = x.Id == currentId,
+            preview = string.IsNullOrEmpty(x.Preview) ? "" : baseUrl + "pv/" + Uri.EscapeDataString(x.Id)
+        }).ToList();
+
+        return JsonSerializer.Serialize(new
+        {
+            ok = true,
+            opacity = Math.Clamp(Configuration.Opacity, 0, 100),
+            blur = Math.Clamp(Configuration.Blur, 0, 30),
+            panel = Math.Clamp(Configuration.PanelOpacity, 0, 100),
+            bubble = Math.Clamp(Configuration.BubbleOpacity, 0, 100),
+            whiteScrim = Configuration.WhiteScrim,
+            brightness = Math.Clamp(Configuration.Brightness, 0, 200),
+            contrast = Math.Clamp(Configuration.Contrast, 0, 200),
+            saturate = Math.Clamp(Configuration.Saturate, 0, 200),
+            mute = Configuration.Mute,
+            volume = Math.Clamp(Configuration.Volume, 0, 100),
+            rate = Math.Clamp(Configuration.PlaybackRate, 50, 200),
+            kind = current?.Type ?? "",
+            liveScene = Configuration.LiveScene,
+            // 场景脚本关着的话属性值只会被引擎存下来，画面上不会有变化：面板要能说清这件事
+            scripts = Configuration.SceneScripts,
+            scene,
+            applied,
+            parallax = Math.Clamp(Configuration.Parallax, 0, 100),
+            // 右下角挂件的外观：0 = 经典胶囊，1 / 2 = Q 版大肥鱼形象
+            petAvatar = Math.Clamp(Configuration.PetAvatar, 0, 2),
+            petSize = Math.Clamp(Configuration.PetSize, 56, 120),
+            widgetX = Configuration.WidgetX,
+            widgetY = Configuration.WidgetY,
+            // 挂件面板自己的不透明度（与页面卡片的「白度」分开）
+            wpanel = Math.Clamp(Configuration.WidgetPanelOpacity, 0, 100) / 100.0,
+            // 场景走 setProperties，网页走 postMessage 桥；视频没有属性通道
+            props = (current != null && (
+                        (string.Equals(current.Type, "scene", StringComparison.OrdinalIgnoreCase) && Configuration.LiveScene) ||
+                        string.Equals(current.Type, "web", StringComparison.OrdinalIgnoreCase)))
+                ? WallpaperProps.ForPanel(WallpaperProps.Resolve(current, WallpaperProps.Store.Get(current.Id)))
+                : new List<object>(),
+            count = catalog.Count,
+            items
+        });
+    }
+
+    static bool IsTrue(string? raw)
+        => raw != null && (raw == "1" || raw.Equals("true", StringComparison.OrdinalIgnoreCase));
+
+    static Dictionary<string, string> ParseQuery(string query)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string pair in (query ?? "").Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int eq = pair.IndexOf('=');
+            string key = eq >= 0 ? pair.Substring(0, eq) : pair;
+            string value = eq >= 0 ? pair.Substring(eq + 1) : "";
+
+            try { result[Uri.UnescapeDataString(key)] = Uri.UnescapeDataString(value.Replace("+", " ")); }
+            catch { }
+        }
+
+        return result;
+    }
+
+    // ---------------- AI 可调用函数 ----------------
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("切换 Alife 界面背景壁纸。query 填标题关键词或壁纸 ID；留空则使用默认/第一张。")]
+    public async Task SetWallpaper([Description("壁纸标题关键词或 ID，可留空")] string query = "")
+    {
+        if (catalog.Count == 0) catalog.Refresh(Configuration);
+
+        WallpaperItem? item = catalog.Find(query);
+        if (item == null)
+        {
+            interactor.Poke(catalog.Count == 0
+                ? "壁纸库为空：请先在 Wallpaper Engine 订阅壁纸，或在模块设置里添加额外壁纸目录。"
+                : $"没有找到匹配「{query}」的壁纸。可用壁纸：" + string.Join("、", catalog.Items.Take(10).Select(x => x.Title)));
+            return;
+        }
+
+        try
+        {
+            await PlayAsync(item);
+            interactor.Poke($"已切换壁纸：{item.Title}（{item.Type}）。");
+        }
+        catch (Exception ex)
+        {
+            interactor.Poke("切换壁纸失败：" + ex.Message);
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("按标签/氛围切换壁纸（如 风景、赛博朋克、夜景、治愈、动漫）；找不到标签时按标题关键词匹配。")]
+    public async Task SetWallpaperByTag([Description("标签或氛围关键词")] string tag)
+    {
+        if (catalog.Count == 0) catalog.Refresh(Configuration);
+
+        WallpaperItem? item = catalog.FindByTag(tag);
+        if (item == null)
+        {
+            interactor.Poke(catalog.Count == 0
+                ? "壁纸库为空：请先在 Wallpaper Engine 订阅壁纸，或在模块设置里添加额外壁纸目录。"
+                : $"没有找到标签或标题包含「{tag}」的壁纸。可调用 ListWallpaperTags 看看有哪些标签。");
+            return;
+        }
+
+        try
+        {
+            await PlayAsync(item);
+            string tags = item.Tags.Count > 0 ? "，标签：" + string.Join("、", item.Tags) : "";
+            interactor.Poke($"已切换到「{item.Title}」（{item.Type}{tags}）。");
+        }
+        catch (Exception ex)
+        {
+            interactor.Poke("切换壁纸失败：" + ex.Message);
+        }
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("切换到下一张壁纸。")]
+    public Task NextWallpaper() => StepAsync(1);
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("切换到上一张壁纸。")]
+    public Task PreviousWallpaper() => StepAsync(-1);
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("列出壁纸库（标题、类型、ID、标签），用于挑选要切换的壁纸。")]
+    public Task ListWallpapers([Description("最多返回数量，默认 20")] int limit = 20)
+    {
+        if (catalog.Count == 0) catalog.Refresh(Configuration);
+
+        if (catalog.Count == 0)
+        {
+            interactor.Poke("壁纸库为空。");
+            return Task.CompletedTask;
+        }
+
+        limit = Math.Clamp(limit, 1, 100);
+        string lines = string.Join("\n", catalog.Items.Take(limit)
+            .Select((x, i) => $"{i + 1}. {x.Title} [{x.Type}] {x.Id}" +
+                              (x.Tags.Count > 0 ? " #" + string.Join(" #", x.Tags.Take(4)) : "")));
+
+        interactor.Poke($"壁纸库共 {catalog.Count} 张：\n{lines}" +
+                        (catalog.Count > limit ? $"\n…（仅显示前 {limit} 张）" : ""));
+        return Task.CompletedTask;
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("列出壁纸库里出现过的标签（按出现次数排序），便于按氛围挑选。")]
+    public Task ListWallpaperTags()
+    {
+        if (catalog.Count == 0) catalog.Refresh(Configuration);
+
+        var tags = catalog.Items
+            .SelectMany(x => x.Tags)
+            .GroupBy(x => x, StringComparer.CurrentCultureIgnoreCase)
+            .OrderByDescending(g => g.Count())
+            .Take(60)
+            .Select(g => g.Key)
+            .ToList();
+
+        interactor.Poke(tags.Count == 0
+            ? "壁纸库没有标签信息；可以直接用标题关键词调用 SetWallpaper。"
+            : "可用标签：" + string.Join("、", tags));
+        return Task.CompletedTask;
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("查询当前正在显示的壁纸。")]
+    public Task CurrentWallpaper()
+    {
+        if (current == null)
+        {
+            interactor.Poke("当前没有显示壁纸。");
+        }
+        else
+        {
+            string tags = current.Tags.Count > 0 ? "，标签：" + string.Join("、", current.Tags) : "";
+            interactor.Poke($"当前壁纸：{current.Title}（{current.Type}，{current.Id}{tags}）。");
+        }
+        return Task.CompletedTask;
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("停止显示壁纸（移除 Alife 界面背景层，可随时再切换）。")]
+    public async Task StopWallpaper()
+    {
+        await StopAsync();
+        interactor.Poke("已停止显示壁纸。");
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
+    [Description("重新扫描本机 Wallpaper Engine 壁纸库（刚订阅新壁纸后调用）。")]
+    public Task RescanWallpapers()
+    {
+        catalog.Refresh(Configuration);
+        index = current == null ? -1 : catalog.IndexOf(current);
+        interactor.Poke($"已重新扫描：{catalog.LastSummary}。");
+        return Task.CompletedTask;
+    }
+}
