@@ -1,0 +1,136 @@
+{
+ "generated": "2026-10-09T10:34:01.616Z",
+ "count": 26,
+ "fonts": [
+  {
+   "alias": "Lanxi-狂派手书",
+   "file": "Aa狂派手书.woff2",
+   "sizeKB": 10399
+  },
+  {
+   "alias": "Lanxi-GreatVibes",
+   "file": "Lanxi-GreatVibes.woff2",
+   "sizeKB": 44
+  },
+  {
+   "alias": "Lanxi-HeiTi",
+   "file": "Lanxi-HeiTi.woff2",
+   "sizeKB": 1303
+  },
+  {
+   "alias": "Lanxi-HeiTiBold",
+   "file": "Lanxi-HeiTiBold.woff2",
+   "sizeKB": 1354
+  },
+  {
+   "alias": "Lanxi-HeiTiLight",
+   "file": "Lanxi-HeiTiLight.woff2",
+   "sizeKB": 1277
+  },
+  {
+   "alias": "Lanxi-MaShanZheng",
+   "file": "Lanxi-MaShanZheng.woff2",
+   "sizeKB": 1681
+  },
+  {
+   "alias": "Lanxi-WenKai",
+   "file": "Lanxi-WenKai.woff2",
+   "sizeKB": 883
+  },
+  {
+   "alias": "Lanxi-WenKaiLight",
+   "file": "Lanxi-WenKaiLight.woff2",
+   "sizeKB": 921
+  },
+  {
+   "alias": "Lanxi-丫丫体",
+   "file": "Lanxi-丫丫体.woff2",
+   "sizeKB": 1690
+  },
+  {
+   "alias": "Lanxi-初心少女",
+   "file": "Lanxi-初心少女.woff2",
+   "sizeKB": 1499
+  },
+  {
+   "alias": "Lanxi-卡通",
+   "file": "Lanxi-卡通.woff2",
+   "sizeKB": 1202
+  },
+  {
+   "alias": "Lanxi-叮叮",
+   "file": "Lanxi-叮叮.woff2",
+   "sizeKB": 4313
+  },
+  {
+   "alias": "Lanxi-可宋",
+   "file": "Lanxi-可宋.woff2",
+   "sizeKB": 2856
+  },
+  {
+   "alias": "Lanxi-品宋",
+   "file": "Lanxi-品宋.woff2",
+   "sizeKB": 2587
+  },
+  {
+   "alias": "Lanxi-喵喵",
+   "file": "Lanxi-喵喵.woff2",
+   "sizeKB": 2954
+  },
+  {
+   "alias": "Lanxi-春兰茅坤",
+   "file": "Lanxi-春兰茅坤.woff2",
+   "sizeKB": 1767
+  },
+  {
+   "alias": "Lanxi-暗恋初夏",
+   "file": "Lanxi-暗恋初夏.woff2",
+   "sizeKB": 3328
+  },
+  {
+   "alias": "Lanxi-朗宋",
+   "file": "Lanxi-朗宋.woff2",
+   "sizeKB": 2103
+  },
+  {
+   "alias": "Lanxi-点黑",
+   "file": "Lanxi-点黑.woff2",
+   "sizeKB": 1966
+  },
+  {
+   "alias": "Lanxi-狂侠体",
+   "file": "Lanxi-狂侠体.woff2",
+   "sizeKB": 3660
+  },
+  {
+   "alias": "Lanxi-秀英体",
+   "file": "Lanxi-秀英体.woff2",
+   "sizeKB": 1863
+  },
+  {
+   "alias": "Lanxi-超粗黑",
+   "file": "Lanxi-超粗黑.woff2",
+   "sizeKB": 744
+  },
+  {
+   "alias": "Lanxi-静黑超细",
+   "file": "Lanxi-静黑超细.woff2",
+   "sizeKB": 1428
+  },
+  {
+   "alias": "Lanxi-颜宋",
+   "file": "Lanxi-颜宋.woff2",
+   "sizeKB": 2426
+  },
+  {
+   "alias": "Lanxi-鱼尾行书",
+   "file": "Lanxi-鱼尾行书.woff2",
+   "sizeKB": 3794
+  },
+  {
+   "alias": "Lanxi-鱼尾行书繁",
+   "file": "Lanxi-鱼尾行书繁.woff2",
+   "sizeKB": 7821
+  }
+ ]
+}

@@ -1,0 +1,10 @@
+{
+  "Version": "1.0.0",
+  "Dependencies": {
+    "Alife.Function.FunctionCaller": "",
+    "Alife.Function.MessageFilter": "",
+    "Alife.Function.QChat": "",
+    "Alife.Function.QChatSender": ""
+  },
+  "Environments": {}
+}

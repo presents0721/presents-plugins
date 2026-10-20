@@ -1,0 +1,29 @@
+/* fonts.css —— Lanxi 字体库（由 DSH 插件 assets/fonts 移植；@font-face 全局注册，
+   卡片里直接写 font-family:'Lanxi-XXX' 即可命中，无需自建 @font-face）。
+   生成脚本：见本插件 README「字体」一节。 */
+@font-face{font-family:'Lanxi-狂派手书';src:url('fonts/Aa%E7%8B%82%E6%B4%BE%E6%89%8B%E4%B9%A6.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-GreatVibes';src:url('fonts/Lanxi-GreatVibes.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-HeiTi';src:url('fonts/Lanxi-HeiTi.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-HeiTiBold';src:url('fonts/Lanxi-HeiTiBold.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-HeiTiLight';src:url('fonts/Lanxi-HeiTiLight.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-MaShanZheng';src:url('fonts/Lanxi-MaShanZheng.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-WenKai';src:url('fonts/Lanxi-WenKai.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-WenKaiLight';src:url('fonts/Lanxi-WenKaiLight.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-丫丫体';src:url('fonts/Lanxi-%E4%B8%AB%E4%B8%AB%E4%BD%93.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-初心少女';src:url('fonts/Lanxi-%E5%88%9D%E5%BF%83%E5%B0%91%E5%A5%B3.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-卡通';src:url('fonts/Lanxi-%E5%8D%A1%E9%80%9A.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-叮叮';src:url('fonts/Lanxi-%E5%8F%AE%E5%8F%AE.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-可宋';src:url('fonts/Lanxi-%E5%8F%AF%E5%AE%8B.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-品宋';src:url('fonts/Lanxi-%E5%93%81%E5%AE%8B.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-喵喵';src:url('fonts/Lanxi-%E5%96%B5%E5%96%B5.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-春兰茅坤';src:url('fonts/Lanxi-%E6%98%A5%E5%85%B0%E8%8C%85%E5%9D%A4.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-暗恋初夏';src:url('fonts/Lanxi-%E6%9A%97%E6%81%8B%E5%88%9D%E5%A4%8F.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-朗宋';src:url('fonts/Lanxi-%E6%9C%97%E5%AE%8B.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-点黑';src:url('fonts/Lanxi-%E7%82%B9%E9%BB%91.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-狂侠体';src:url('fonts/Lanxi-%E7%8B%82%E4%BE%A0%E4%BD%93.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-秀英体';src:url('fonts/Lanxi-%E7%A7%80%E8%8B%B1%E4%BD%93.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-超粗黑';src:url('fonts/Lanxi-%E8%B6%85%E7%B2%97%E9%BB%91.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-静黑超细';src:url('fonts/Lanxi-%E9%9D%99%E9%BB%91%E8%B6%85%E7%BB%86.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-颜宋';src:url('fonts/Lanxi-%E9%A2%9C%E5%AE%8B.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-鱼尾行书';src:url('fonts/Lanxi-%E9%B1%BC%E5%B0%BE%E8%A1%8C%E4%B9%A6.woff2');font-display:swap;}
+@font-face{font-family:'Lanxi-鱼尾行书繁';src:url('fonts/Lanxi-%E9%B1%BC%E5%B0%BE%E8%A1%8C%E4%B9%A6%E7%B9%81.woff2');font-display:swap;}

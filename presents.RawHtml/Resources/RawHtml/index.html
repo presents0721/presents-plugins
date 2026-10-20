@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Raw HTML 卡片面板</title>
+  <!-- KaTeX 样式 -->
+  <link rel="stylesheet" href="vendor/katex.min.css" />
+  <link rel="stylesheet" href="vendor/katex-vd.css" />
+  <!-- Lanxi 字体库（26 款 @font-face，由 DSH 插件 assets/fonts 移植；卡片可直接写 font-family:'Lanxi-XXX'） -->
+  <link rel="stylesheet" href="fonts.css" />
+  <!-- 面板自身的「渲染设置 / 美学系统」界面样式 -->
+  <link rel="stylesheet" href="panel.css" />
+  <style>
+    html, body { margin: 0; padding: 0; background: var(--panel-bg, #0f1115); color: #e7e7e7;
+      font-family: ui-sans-serif, system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    /* 深色一体化标题栏：系统标题栏已隐藏（TitleBarStyle.hidden），这里自绘一条并作为窗口拖拽区。
+       右侧预留 150px 给系统的最小化/最大化/关闭按钮（TitleBarOverlay）。 */
+    body { padding-top: 36px; }
+    #titlebar { position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 20;
+      display: flex; align-items: center; padding: 0 150px 0 14px; background: #171a21;
+      border-bottom: 1px solid #262b35; -webkit-app-region: drag; user-select: none; }
+    #titlebar-title { font-size: 12px; color: #9aa4b2; letter-spacing: .02em; }
+    #toolbar { position: sticky; top: 36px; z-index: 10; display: flex; gap: 8px; align-items: center;
+      padding: 8px 12px; background: #171a21; border-bottom: 1px solid #262b35; }
+    #toolbar button { background: #2b3240; color: #e7e7e7; border: 1px solid #3a4252;
+      border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 13px; -webkit-app-region: no-drag; }
+    #toolbar button:hover { background: #343d4d; }
+    #cards { padding: 16px 0 28px; display: flex; flex-direction: column; gap: 16px; }
+    /* 卡片外层占满面板；卡片实际宽度与左右留白由 alife-bridge.js 的「等比缩放贴合面板」统一处理 */
+    .vcp-card-wrap { width: 100%; position: relative; }
+    /* 渲染失败时的可见报错块：面板永不静默空白 */
+    .vcp-card-error { border: 1px solid #7f1d1d; background: #2a1416; color: #fca5a5;
+      border-radius: 8px; padding: 12px 14px; font-size: 13px; line-height: 1.6; }
+    /* 背景调色盘 */
+    #bg-pop { display: none; position: absolute; top: 100%; left: 10px; z-index: 30;
+      background: #1c212b; border: 1px solid #2f3744; border-radius: 10px; padding: 10px 12px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+    #bg-pop.show { display: block; }
+    .rh-pop-row { display: flex; gap: 6px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
+    .bg-swatch { width: 22px; height: 22px; border-radius: 6px; border: 1px solid rgba(255,255,255,.18);
+      cursor: pointer; padding: 0; }
+    .bg-swatch.sel { outline: 2px solid #6ea8fe; outline-offset: 1px; }
+    .rh-pop-label { font-size: 12px; color: #9aa4b2; }
+    #bg-color { width: 34px; height: 24px; border: none; background: none; cursor: pointer; padding: 0; }
+    .rh-pop-btn { background: #2b3240; color: #e7e7e7; border: 1px solid #3a4252; border-radius: 6px;
+      padding: 3px 10px; cursor: pointer; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="titlebar"><span id="titlebar-title">Raw HTML 卡片面板</span></div>
+  <div id="toolbar">
+    <button id="btn-sample">渲染示例卡片</button>
+    <button id="btn-clear">清空</button>
+    <button id="btn-settings" title="打开渲染设置：渲染 HTML / 美学注入开关">⚙ 渲染设置</button>
+    <button id="btn-aesthetic" title="打开美学系统，点风格卡即锁定">🎨 美学系统</button>
+    <button id="btn-history" title="历史记录：重启后不自动展示，可在此恢复 / 删除本地留存的卡片">🕘 历史记录</button>
+    <button id="btn-save" title="把渲染出的卡片保存成文件（HTML 合并 / 每卡一个 HTML / PDF）">⤓ 保存全部</button>
+    <button id="btn-bg" title="面板背景颜色">🎨 背景</button>
+    <div id="bg-pop" class="rh-pop">
+      <div class="rh-pop-row" id="bg-swatches"></div>
+      <div class="rh-pop-row">
+        <span class="rh-pop-label">自定义</span>
+        <input type="color" id="bg-color" value="#0f1115" />
+        <button id="bg-reset" class="rh-pop-btn">重置</button>
+      </div>
+    </div>
+    <span id="state-hint" style="margin-left:auto;opacity:.6;font-size:12px">Raw HTML 卡片面板（VCP 引擎）</span>
+  </div>
+  <div id="render-off-banner" class="rh-off-banner">
+    「渲染 HTML」当前处于关闭状态：AI 不会再调用渲染函数，输出里的 HTML 只会作为普通文本。
+    点右上角「⚙ 渲染设置」可以重新打开。
+  </div>
+  <div id="cards"></div>
+
+  <!-- 1) KaTeX + 自动渲染（提供 window.renderMathInElement） -->
+  <script src="vendor/katex.min.js?v=2"></script>
+  <script src="vendor/auto-render.min.js?v=2"></script>
+  <!-- 2) Mermaid 图表引擎 -->
+  <script src="vendor/mermaid.min.js?v=2"></script>
+  <!-- 3) VCP 色彩引擎（data-vcp-preset 声明式配色） -->
+  <script src="vendor/VCPColorEngine.js?v=2"></script>
+  <!-- 4) 宿主 shim：给引擎补上原 DSH bundle 里的 f / vc / hp，并提供 vdom→DOM 挂载器。
+       必须排在引擎之前 —— 引擎直接引用这几个宿主作用域里的标识符与 f.Fragment。 -->
+  <script src="vcp-host-shim.js?v=2"></script>
+  <!-- 5) vcp 渲染内核：加载后挂出 window.__vcpStable.render / window.__vcpMath。
+       注意 render() 返回的是 vdom（React 元素），要用 window.__vcpMount 挂载。 -->
+  <script src="vcp-engine-v1.js?v=2"></script>
+  <!-- 6) Alife 桥：接收 C# 消息并渲染。
+       注意：file:// 下静态 <script src="...?v=N"> 无法破缓存（Electron 会沿用磁盘旧 JS）。
+       因此 alife-bridge.js 与 panel-settings.js（这两个文件频繁修改）改为「启动时用时间戳动态注入」，
+       每次加载都是全新 URL，确保永远拉到最新版本，无需手动硬刷新。 -->
+  <script>
+    (function () {
+      var cb = Date.now();   // 本次面板加载的唯一时间戳：两份脚本都带它，file:// 缓存永远命中不到
+      function load(src, onload) {
+        var s = document.createElement('script');
+        s.src = src + (src.indexOf('?') >= 0 ? '&' : '?') + 'cb=' + cb;
+        if (onload) s.onload = onload;
+        s.onerror = function () { console.error('[RawHtml] 脚本加载失败: ' + src); };
+        document.head.appendChild(s);
+      }
+      // 先桥、后面板（面板依赖桥暴露的 window.RawHtmlBridge / window.RawHtmlPanel）
+      load('alife-bridge.js', function () { load('panel-settings.js'); });
+    })();
+  </script>
+</body>
+</html>
