@@ -22,7 +22,7 @@ internal sealed class AlifeBackground
         (function () {
           // 版本守卫：插件重载后页面里还挂着旧脚本，必须让新版覆盖它，
           // 否则一直跑老逻辑（旧版没有挂件、也没有磨砂面板）。
-          var VER = '5.7.2';
+          var VER = '1.7.2';
           if (window.__alifeWpVer === VER && window.__alifeWallpaperShow) return 'ready';
 
           // 换版本时旧挂件的 DOM 和事件还挂在页面上（__alifeWallpaperWidget 见到就早退），
