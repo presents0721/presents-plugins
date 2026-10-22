@@ -19,6 +19,9 @@ internal sealed record WallpaperItem(
     /// <summary>project.json 里的 tags，供 AI 按风格/氛围挑选。</summary>
     public IReadOnlyList<string> Tags { get; init; } = Array.Empty<string>();
 
-    /// <summary>video / web 可以直接播放；scene 暂时以预览图展示。</summary>
-    public bool IsPlayable => Type is "video" or "web";
+    /// <summary>video / web / image 可以直接显示；scene 暂时以预览图展示。</summary>
+    public bool IsPlayable => Type is "video" or "web" or "image";
+
+    /// <summary>用户自己丢进来的图片 / 视频（不是 Wallpaper Engine 项目）。</summary>
+    public bool IsUserMedia => Source == "media";
 }
