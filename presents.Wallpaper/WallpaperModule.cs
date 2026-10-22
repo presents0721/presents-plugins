@@ -9,6 +9,7 @@ using Alife.Foundation;
 using Alife.Framework;
 using Alife.Function.FunctionCaller;
 using ElectronNET.API;
+using ElectronNET.API.Entities;
 using Microsoft.Extensions.Logging;
 
 namespace presents.Wallpaper;
@@ -237,7 +238,7 @@ public sealed class WallpaperModule(
         WallpaperItem? item = catalog.Step(index, delta);
         if (item == null)
         {
-            interactor.Poke("壁纸库为空：请先在 Wallpaper Engine 订阅壁纸，或在模块设置里添加额外壁纸目录。");
+            interactor.Poke("壁纸库为空：先在 Wallpaper Engine 订阅壁纸，或在「自定义壁纸目录」里填文件夹；也可以直接把图片 / 视频丢进 图片\\AlifeWallpaper。");
             return;
         }
 
@@ -323,14 +324,63 @@ public sealed class WallpaperModule(
         {
             case "/api/state":
             {
+                // 用户刚把图片丢进素材目录时，挂件下一次轮询就能看到（不用重启插件）
+                if ((DateTime.UtcNow - catalog.LastScanUtc).TotalSeconds > 120)
+                    catalog.Refresh(Configuration);
+
                 // 实时渲染到底起没起来：起不来时页面只剩预览图，调什么都像"没反应"
                 string scene = background == null ? "" : await background.EvalAsync("window.__alifeWpScene ? 'up' : 'down'");
                 return BuildStateJson("", scene.Trim() == "up" ? "up" : "down");
             }
 
+            // 手动重扫素材（放完新图不想等 2 分钟就点这个）
+            case "/api/rescan":
+            {
+                catalog.Refresh(Configuration);
+                return BuildStateJson();
+            }
+
+            // 挂件「我的」里点「＋ 文件夹」：弹系统目录选择，选完立刻扫描并记住
+            case "/api/pickdir":
+            {
+                string? picked = await PickMediaDirectoryAsync();
+
+                if (!string.IsNullOrWhiteSpace(picked))
+                {
+                    AddMediaDirectory(picked);
+                    PersistConfig();
+                    catalog.Refresh(Configuration);
+                }
+
+                return BuildStateJson();
+            }
+
+            case "/api/forgetdir":
+            {
+                RemoveMediaDirectory(args.GetValueOrDefault("path"));
+                PersistConfig();
+                catalog.Refresh(Configuration);
+                return BuildStateJson();
+            }
+
+            // 在资源管理器里打开目录：没填路径就打开推荐投放目录
+            case "/api/reveal":
+            {
+                RevealMediaDirectory(args.GetValueOrDefault("path"));
+                return BuildStateJson();
+            }
+
             case "/api/switch":
             {
                 WallpaperItem? item = catalog.Find(args.GetValueOrDefault("id"));
+
+                // 找不到就重扫一次：常见于刚丢进素材目录、还没到自动重扫时间
+                if (item == null)
+                {
+                    catalog.Refresh(Configuration);
+                    item = catalog.Find(args.GetValueOrDefault("id"));
+                }
+
                 if (item == null) return "{\"ok\":false,\"error\":\"没有找到这张壁纸\"}";
 
                 await PlayAsync(item);
@@ -405,7 +455,7 @@ public sealed class WallpaperModule(
                 bool media = false;
                 if (args.TryGetValue("vol", out string? vo) && int.TryParse(vo, out int vv))
                 {
-                    Configuration.Volume = Math.Clamp(vv, 0, 100);
+                    Configuration.Volume = Math.Clamp(vv, 0, 200);
                     media = true;
                 }
                 if (args.TryGetValue("rate", out string? rt) && int.TryParse(rt, out int rv))
@@ -536,6 +586,8 @@ public sealed class WallpaperModule(
             title = x.Title,
             type = x.Type,
             playable = x.IsPlayable,
+            // 挂件用 src 把「引擎壁纸」和「我的素材」分成两个标签，别混在一张列表里
+            src = x.Source,
             current = x.Id == currentId,
             preview = string.IsNullOrEmpty(x.Preview) ? "" : baseUrl + "pv/" + Uri.EscapeDataString(x.Id)
         }).ToList();
@@ -552,7 +604,7 @@ public sealed class WallpaperModule(
             contrast = Math.Clamp(Configuration.Contrast, 0, 200),
             saturate = Math.Clamp(Configuration.Saturate, 0, 200),
             mute = Configuration.Mute,
-            volume = Math.Clamp(Configuration.Volume, 0, 100),
+            volume = Math.Clamp(Configuration.Volume, 0, 200),
             rate = Math.Clamp(Configuration.PlaybackRate, 50, 200),
             kind = current?.Type ?? "",
             liveScene = Configuration.LiveScene,
@@ -575,8 +627,102 @@ public sealed class WallpaperModule(
                 ? WallpaperProps.ForPanel(WallpaperProps.Resolve(current, WallpaperProps.Store.Get(current.Id)))
                 : new List<object>(),
             count = catalog.Count,
+            // 「我的」标签用：数量、已添加的目录、推荐投放目录
+            mediaCount = catalog.Items.Count(x => x.IsUserMedia),
+            mediaDirs = MediaDirectoryList(),
+            dropDir = DefaultDropDirectory(),
             items
         });
+    }
+
+    // ---------------- 自定义素材目录 ----------------
+
+    async Task<string?> PickMediaDirectoryAsync()
+    {
+        try
+        {
+            var parent = Electron.WindowManager.BrowserWindows.FirstOrDefault();
+
+            string[]? picked = await Electron.Dialog.ShowOpenDialogAsync(parent, new OpenDialogOptions
+            {
+                Title = "选择要递归扫描的壁纸文件夹",
+                ButtonLabel = "添加",
+                Properties = new[] { OpenDialogProperty.openDirectory },
+            });
+
+            return picked?.FirstOrDefault();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[WallpaperEngine] 打开目录选择器失败");
+            // 选不出来总得给点反馈，否则用户只看到按钮没反应
+            interactor.Poke("打开文件夹选择器失败：" + ex.Message + "（也可以在模块设置里手填「自定义壁纸目录」）");
+            return null;
+        }
+    }
+
+    List<string> MediaDirectoryList()
+        => (Configuration.MediaDirectories ?? "")
+            .Split(new[] { '\r', '\n', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(x => x.Trim().Trim('"'))
+            .Where(x => x.Length > 0)
+            .ToList();
+
+    void AddMediaDirectory(string path)
+    {
+        List<string> dirs = MediaDirectoryList();
+
+        if (dirs.Any(x => string.Equals(x, path, StringComparison.OrdinalIgnoreCase))) return;
+
+        dirs.Add(path);
+        Configuration.MediaDirectories = string.Join("\n", dirs);
+    }
+
+    void RemoveMediaDirectory(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+
+        List<string> dirs = MediaDirectoryList()
+            .Where(x => !string.Equals(x, path, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        Configuration.MediaDirectories = string.Join("\n", dirs);
+    }
+
+    /// <summary>在资源管理器里打开目录；没给路径就打开推荐投放目录。</summary>
+    void RevealMediaDirectory(string? path)
+    {
+        string target = string.IsNullOrWhiteSpace(path) ? DefaultDropDirectory() : path!;
+        if (target.Length == 0) return;
+
+        try
+        {
+            if (!Directory.Exists(target)) Directory.CreateDirectory(target);
+
+            // 必须写全名：using ElectronNET.API 后 Process 和 ElectronNET.API.Process 撞名（CS0104）
+            System.Diagnostics.Process.Start(
+                new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + target + "\"")
+                {
+                    UseShellExecute = true,
+                });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[WallpaperEngine] 打开目录失败：{Path}", target);
+        }
+    }
+
+    /// <summary>推荐投放目录：图片\AlifeWallpaper（始终参与扫描）。</summary>
+    static string DefaultDropDirectory()
+    {
+        string pictures = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
+        if (string.IsNullOrWhiteSpace(pictures)) return "";
+
+        string dir = Path.Combine(pictures, "AlifeWallpaper");
+        try { Directory.CreateDirectory(dir); }
+        catch { }
+
+        return dir;
     }
 
     static bool IsTrue(string? raw)
@@ -602,6 +748,15 @@ public sealed class WallpaperModule(
     // ---------------- AI 可调用函数 ----------------
 
     [XmlFunction(FunctionMode.OneShot)]
+    [Description("重新扫描壁纸库：会把自己丢进「图片 / AlifeWallpaper」等目录的图片和视频一起收进来。刚放了新文件时调用一次即可。")]
+    public Task RefreshWallpapers()
+    {
+        catalog.Refresh(Configuration);
+        interactor.Poke(catalog.LastSummary);
+        return Task.CompletedTask;
+    }
+
+    [XmlFunction(FunctionMode.OneShot)]
     [Description("切换 Alife 界面背景壁纸。query 填标题关键词或壁纸 ID；留空则使用默认/第一张。")]
     public async Task SetWallpaper([Description("壁纸标题关键词或 ID，可留空")] string query = "")
     {
@@ -611,7 +766,7 @@ public sealed class WallpaperModule(
         if (item == null)
         {
             interactor.Poke(catalog.Count == 0
-                ? "壁纸库为空：请先在 Wallpaper Engine 订阅壁纸，或在模块设置里添加额外壁纸目录。"
+                ? "壁纸库为空：先在 Wallpaper Engine 订阅壁纸，或在「自定义壁纸目录」里填文件夹；也可以直接把图片 / 视频丢进 图片\\AlifeWallpaper。"
                 : $"没有找到匹配「{query}」的壁纸。可用壁纸：" + string.Join("、", catalog.Items.Take(10).Select(x => x.Title)));
             return;
         }
@@ -637,7 +792,7 @@ public sealed class WallpaperModule(
         if (item == null)
         {
             interactor.Poke(catalog.Count == 0
-                ? "壁纸库为空：请先在 Wallpaper Engine 订阅壁纸，或在模块设置里添加额外壁纸目录。"
+                ? "壁纸库为空：先在 Wallpaper Engine 订阅壁纸，或在「自定义壁纸目录」里填文件夹；也可以直接把图片 / 视频丢进 图片\\AlifeWallpaper。"
                 : $"没有找到标签或标题包含「{tag}」的壁纸。可调用 ListWallpaperTags 看看有哪些标签。");
             return;
         }
