@@ -74,12 +74,28 @@ public sealed class WallpaperConfig
     public bool Mute { get; set; } = true;
 
     [DisplayName("音量")]
-    [Description("0–100，仅在取消静音时生效。")]
-    public int Volume { get; set; } = 60;
+    [Description("0–200，仅在取消静音时生效。100 = 原始音量，超过 100 走 WebAudio 增益放大（很多 Wallpaper Engine 视频本身只有 -30dB 左右，嫌小就拉到 150–200）。")]
+    public int Volume { get; set; } = 100;
 
     [DisplayName("额外壁纸目录")]
     [Description("每行一个目录；目录下每个子文件夹含 project.json（Wallpaper Engine 项目格式）。")]
     public string ExtraDirectories { get; set; } = "";
+
+    [DisplayName("自定义壁纸目录")]
+    [Description("每行一个目录，递归扫描里面的图片 / 视频。推荐直接在挂件「我的」标签里点「＋ 文件夹」选，这里只是手工兜底。图片 jpg/png/webp/bmp/gif/avif，视频 mp4/webm/m4v/mov。")]
+    public string MediaDirectories { get; set; } = "";
+
+    [DisplayName("自动扫描图片 / 视频 / 桌面")]
+    [Description("默认关闭，避免把个人目录里的成百上千张图混进壁纸列表。开启后才会扫「图片」「视频」「桌面根目录」；「图片\\AlifeWallpaper」这个投放目录始终有效。")]
+    public bool ScanUserFolders { get; set; } = false;
+
+    [DisplayName("素材递归深度")]
+    [Description("1–6 层。太深等于把硬盘扫一遍，默认 3 层足够覆盖 图片/2024/旅行/xx.jpg。")]
+    public int MediaDepth { get; set; } = 3;
+
+    [DisplayName("素材数量上限")]
+    [Description("最多收录多少个文件（全局），大的图优先——避免几十万张图把列表拖垮；默认 200。")]
+    public int MediaLimit { get; set; } = 200;
 
     [DisplayName("默认壁纸")]
     [Description("启动时显示的壁纸 ID 或标题关键词；留空则取列表第一个。")]
