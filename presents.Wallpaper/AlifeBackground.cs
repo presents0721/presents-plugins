@@ -22,7 +22,7 @@ internal sealed class AlifeBackground
         (function () {
           // 版本守卫：插件重载后页面里还挂着旧脚本，必须让新版覆盖它，
           // 否则一直跑老逻辑（旧版没有挂件、也没有磨砂面板）。
-          var VER = '5.6.8';
+          var VER = '5.7.2';
           if (window.__alifeWpVer === VER && window.__alifeWallpaperShow) return 'ready';
 
           // 换版本时旧挂件的 DOM 和事件还挂在页面上（__alifeWallpaperWidget 见到就早退），
@@ -347,6 +347,9 @@ internal sealed class AlifeBackground
               v.muted = !!cfg.mute;
               v.playsInline = true;
               v.style.objectFit = cfg.fit === 'contain' ? 'contain' : 'cover';
+              // CORS 取流（服务端已带 Access-Control-Allow-Origin）：挂了 WebAudio 增益后
+              // 音量才能推到 200%，否则 MediaElementSource 对 no-cors 媒体会直接输出静音
+              v.crossOrigin = 'anonymous';
               v.volume = Math.max(0, Math.min(1, (cfg.volume | 0) / 100));
               var vrate = Math.max(0.5, Math.min(2, cfg.rate || 1));
               v.defaultPlaybackRate = vrate;
@@ -355,6 +358,17 @@ internal sealed class AlifeBackground
               root.appendChild(v);
               var p = v.play();
               if (p && p.catch) p.catch(function () { });
+
+              // 记住的音量可能超过 100%：能接上 WebAudio 增益就立刻接上，
+              // 否则重载后会一直停在 1.0，得手动拖一下滑块才生效
+              wpWireGain(v, cfg.volume);
+            } else if (cfg.kind === 'image' && cfg.url) {
+              // 用户自己的静态壁纸 / GIF：原样铺满，不做 soften（那是给场景封面糊化用的）
+              var still = document.createElement('img');
+              still.style.objectFit = cfg.fit === 'contain' ? 'contain' : 'cover';
+              still.decoding = 'async';
+              still.src = cfg.url;
+              root.appendChild(still);
             } else if (cfg.kind === 'web' && cfg.url) {
               var f = document.createElement('iframe');
               f.src = cfg.url;
@@ -486,6 +500,48 @@ internal sealed class AlifeBackground
             return done.join(',') || 'no-target';
           };
 
+          // 音量 0-200：100 以上靠 WebAudio 增益推，元素本身固定 1.0
+          function wpWireGain(v, pct) {
+            if (!v) return false;
+
+            if (!window.__alifeWpAudioCtx) {
+              var Ctx = window.AudioContext || window.webkitAudioContext;
+              if (!Ctx) return false;
+              try { window.__alifeWpAudioCtx = new Ctx(); } catch (e) { return false; }
+            }
+
+            var ctx = window.__alifeWpAudioCtx;
+            if (ctx.state === 'suspended') { try { ctx.resume(); } catch (e) { } }
+            if (ctx.state !== 'running') return false;
+
+            try {
+              if (!v.__wpGain) {
+                var src = ctx.createMediaElementSource(v);
+                var gain = ctx.createGain();
+                src.connect(gain);
+                gain.connect(ctx.destination);
+                v.__wpGain = gain;
+                v.volume = 1;
+              }
+
+              v.__wpGain.gain.value = Math.max(0, Math.min(2, (+pct || 0) / 100));
+              return true;
+            } catch (e) {
+              return false;
+            }
+          }
+
+          // 浏览器策略下 AudioContext 要用户点一下才 running：点任意处就恢复并接上增益
+          document.addEventListener('pointerdown', function () {
+            var ctx = window.__alifeWpAudioCtx;
+            if (!ctx || ctx.state !== 'suspended') return;
+            ctx.resume().then(function () {
+              var v = document.querySelector('#alife-wallpaper video');
+              var cfg = window.__alifeWpCfg || {};
+              if (v) wpWireGain(v, cfg.volume);
+            }).catch(function () { });
+          }, { passive: true });
+
           window.__alifeWallpaperMedia = function (cfg) {
             var root = document.getElementById('alife-wallpaper');
             var v = root ? root.querySelector('video') : null;
@@ -499,7 +555,14 @@ internal sealed class AlifeBackground
                 if (p && p.catch) p.catch(function () { });
               }
             }
-            if (cfg.volume != null) v.volume = Math.max(0, Math.min(1, (cfg.volume | 0) / 100));
+
+            if (cfg.volume != null) {
+              var pct = Math.max(0, Math.min(200, cfg.volume | 0));
+
+              // 先试 WebAudio 增益（支持 >100%）；接不上就退回元素自己的音量
+              if (!wpWireGain(v, pct)) v.volume = Math.min(1, pct / 100);
+            }
+
             if (cfg.rate != null) {
               var r = Math.max(0.5, Math.min(2, +cfg.rate));
               v.defaultPlaybackRate = r;   // 万一片源重载，倍速也跟着回来
@@ -895,7 +958,7 @@ internal sealed class AlifeBackground
                 '#alife-wp-widget .wp-trigger.pet.failed .wp-pet-img{display:none;}' +
                 '#alife-wp-widget .wp-trigger.pet.failed .wp-pet-fallback{display:block;}' +
                 '#alife-wp-widget .wp-trigger.pet.failed{background:rgba(22,22,28,.86);border:1px solid rgba(255,255,255,.28);box-shadow:0 8px 22px rgba(0,0,0,.45);padding:0 14px 0 11px;height:38px;border-radius:19px;}' +
-                '#alife-wp-widget .wp-panel{position:absolute;right:0;bottom:54px;width:326px;max-width:calc(100vw - 24px);max-height:min(78vh,660px);display:none;flex-direction:column;border-radius:16px;background:rgba(18,18,23,.55);border:1px solid rgba(255,255,255,.12);box-shadow:0 18px 44px rgba(0,0,0,.52);backdrop-filter:blur(9px);color:#e9e9ef;overflow:hidden;}' +
+                '#alife-wp-widget .wp-panel{position:absolute;right:0;bottom:54px;width:392px;max-width:calc(100vw - 24px);max-height:min(86vh,780px);display:none;flex-direction:column;border-radius:16px;background:rgba(18,18,23,.55);border:1px solid rgba(255,255,255,.12);box-shadow:0 18px 44px rgba(0,0,0,.52);backdrop-filter:blur(9px);color:#e9e9ef;overflow:hidden;}' +
                 '#alife-wp-widget.open .wp-panel{display:flex;}' +
                 // 面板调到很透时，文字加深色描边才不会跟壁纸糊在一起
                 '#alife-wp-widget .wp-panel.wp-thin{text-shadow:0 1px 2px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.85);border-color:rgba(255,255,255,.22);}' +
@@ -957,7 +1020,17 @@ internal sealed class AlifeBackground
                 '#alife-wp-widget .wp-item img,#alife-wp-widget .wp-noimg{width:52px;height:32px;border-radius:6px;object-fit:cover;flex:0 0 auto;background:rgba(255,255,255,.08);}' +
                 '#alife-wp-widget .wp-title{flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
                 '#alife-wp-widget .wp-type{font-size:10px;color:#8b8b99;font-style:normal;}' +
-                '#alife-wp-widget .wp-empty{padding:18px;text-align:center;color:#8b8b99;font-size:12px;}';
+                '#alife-wp-widget .wp-empty{padding:18px;text-align:center;color:#8b8b99;font-size:12px;line-height:1.7;}' +
+                // 「我的」页的工具条与已添加目录
+                '#alife-wp-widget .wp-mine-bar{display:flex;gap:6px;padding:2px 2px 6px;}' +
+                '#alife-wp-widget .wp-mine-bar button{flex:1;border:1px solid rgba(124,196,255,.35);background:rgba(124,196,255,.14);color:#cfe6ff;font-size:11px;padding:5px 0;border-radius:8px;cursor:pointer;white-space:nowrap;}' +
+                '#alife-wp-widget .wp-mine-bar button:hover{background:rgba(124,196,255,.26);}' +
+                '#alife-wp-widget .wp-mine-bar button:disabled{opacity:.5;cursor:default;}' +
+                '#alife-wp-widget .wp-dirs{display:flex;flex-direction:column;gap:2px;padding:0 2px 6px;}' +
+                '#alife-wp-widget .wp-dir{display:flex;align-items:center;gap:6px;font-size:11px;color:#9aa0ae;background:rgba(255,255,255,.05);border-radius:7px;padding:3px 6px;}' +
+                '#alife-wp-widget .wp-dir span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
+                '#alife-wp-widget .wp-dir-x{border:0;background:transparent;color:#8b8b99;font-size:13px;line-height:1;cursor:pointer;padding:0 2px;}' +
+                '#alife-wp-widget .wp-dir-x:hover{color:#ff9a9a;}';
               document.head.appendChild(css);
             }
 
@@ -986,11 +1059,12 @@ internal sealed class AlifeBackground
                 '</div>' +
                 '<div class="wp-sliders wp-sound">' +
                   '<div class="wp-row"><span>音轨</span><button class="wp-audio" type="button" data-on="0">关闭</button></div>' +
-                  '<label>音量<input class="wp-vol" type="range" min="0" max="100" step="5"><i></i></label>' +
+                  '<label title="100% = 原始音量；超过 100 走 WebAudio 增益放大，最高 200%">音量<input class="wp-vol" type="range" min="0" max="200" step="5"><i></i></label>' +
                   '<label>倍速<input class="wp-rate" type="range" min="50" max="200" step="10"><i></i></label>' +
                 '</div>' +
                 '<div class="wp-tabs">' +
                   '<button class="wp-tab on" type="button" data-view="list">壁纸</button>' +
+                  '<button class="wp-tab" type="button" data-view="mine">我的</button>' +
                   '<button class="wp-tab" type="button" data-view="props">属性</button>' +
                 '</div>' +
                 '<div class="wp-list"></div>' +
@@ -1025,7 +1099,7 @@ internal sealed class AlifeBackground
             function wpSyncPanelSide() {
               if (!petPanel) return;
               var r = box.getBoundingClientRect();
-              var need = 340;
+              var need = 520;
               var roomAbove = r.top;
               var roomBelow = window.innerHeight - r.bottom;
               var gap = (trigger.classList.contains('pet') ? petPx : 38) + 12;
@@ -1039,7 +1113,7 @@ internal sealed class AlifeBackground
               }
 
               // 挂件拖到屏幕左半边时，面板改从它右边长出去，别伸到屏幕外
-              var pw = 326;
+              var pw = 392;
               if (r.left < pw + 8 && window.innerWidth - r.right > pw * 0.5) {
                 petPanel.style.left = '0';
                 petPanel.style.right = 'auto';
@@ -1126,9 +1200,12 @@ internal sealed class AlifeBackground
             var tabsEl = box.querySelector('.wp-tabs');
             var tabList = box.querySelector('.wp-tab[data-view="list"]');
             var tabProps = box.querySelector('.wp-tab[data-view="props"]');
+            var tabMine = box.querySelector('.wp-tab[data-view="mine"]');
 
             // 场景壁纸的用户属性（project.json 的 general.properties）
             var propsOpen = false;
+            // 「我的」标签：只看自己导入的图片 / 视频，不和引擎壁纸混在一张列表里
+            var mineOpen = false;
             var propsCache = [];
             var lastState = null;      // 最近一次 state，属性页要拿它判断「这次改动到底落到哪了」
 
@@ -1191,6 +1268,16 @@ internal sealed class AlifeBackground
             function findProp(name) {
               for (var i = 0; i < propsCache.length; i++) if (propsCache[i].name === name) return propsCache[i];
               return null;
+            }
+
+            // 挂件列表右下角那行小字：图片 / 视频是用户自己丢进来的，别显示成英文 type
+            function wpTypeLabel(it, state) {
+              if (it.type === 'video') return '视频';
+              if (it.type === 'image') return '图片';
+              if (it.type === 'web') return '网页';
+              if (it.playable) return it.type;
+              if (it.type === 'scene') return (state && state.liveScene) ? '场景' : '仅预览';
+              return '仅预览';
             }
 
             function sendProp(name, value, commit) {
@@ -1387,28 +1474,76 @@ internal sealed class AlifeBackground
               // 换了壁纸之后没有可调项了：自动退回列表，别卡在空属性页
               if (!propCount && propsOpen) propsOpen = false;
 
-              if (tabsEl) tabsEl.style.display = propCount ? 'flex' : 'none';
+              if (tabsEl) tabsEl.style.display = 'flex';
+
+              // 两套列表分开：引擎壁纸（创意工坊 / 项目）和自己导入的图片视频
+              var mineItems = [], engineItems = [];
+              for (var si = 0; si < state.items.length; si++) {
+                (state.items[si].src === 'media' ? mineItems : engineItems).push(state.items[si]);
+              }
+
+              if (countEl) countEl.textContent = (mineOpen ? mineItems.length : engineItems.length) + ' 张';
 
               if (tabProps) {
                 tabProps.className = 'wp-tab' + (propsOpen ? ' on' : '');
                 tabProps.innerHTML = '属性 <em>' + propCount + '</em>';
               }
 
-              if (tabList) tabList.className = 'wp-tab' + (propsOpen ? '' : ' on');
+              if (tabMine) {
+                tabMine.className = 'wp-tab' + (!propsOpen && mineOpen ? ' on' : '');
+                tabMine.innerHTML = '我的 <em>' + mineItems.length + '</em>';
+              }
+
+              if (tabList) tabList.className = 'wp-tab' + (!propsOpen && !mineOpen ? ' on' : '');
 
               if (propsOpen) { renderProps(); return; }
 
+              var shown = mineOpen ? mineItems : engineItems;
               var html = '';
-              for (var i = 0; i < state.items.length; i++) {
-                var it = state.items[i];
+
+              if (mineOpen) {
+                html += '<div class="wp-mine-bar">' +
+                          '<button class="wp-adddir" type="button" title="选一个文件夹，递归扫描里面的图片和视频">＋ 文件夹</button>' +
+                          '<button class="wp-rescan" type="button" title="重新扫描；新丢进去的文件也会出来">重扫</button>' +
+                          '<button class="wp-reveal" type="button" title="在资源管理器里打开推荐投放目录">打开目录</button>' +
+                        '</div>';
+
+                var dirs = state.mediaDirs || [];
+                if (dirs.length) {
+                  html += '<div class="wp-dirs">';
+                  for (var di = 0; di < dirs.length; di++) {
+                    html += '<div class="wp-dir" title="' + esc(dirs[di]) + '">' +
+                              '<span>' + esc(shortDir(dirs[di])) + '</span>' +
+                              '<button class="wp-dir-x" type="button" data-dir="' + esc(dirs[di]) + '" title="不再扫描这个目录">×</button>' +
+                            '</div>';
+                  }
+                  html += '</div>';
+                }
+              }
+
+              for (var i = 0; i < shown.length; i++) {
+                var it = shown[i];
                 html += '<button class="wp-item' + (it.current ? ' current' : '') + '" type="button" data-id="' + esc(it.id) + '">' +
                           (it.preview ? '<img src="' + esc(it.preview) + '" loading="lazy" alt="">' : '<span class="wp-noimg"></span>') +
                           '<span class="wp-title">' + esc(it.title) + '</span>' +
-                          '<em class="wp-type">' + (it.playable ? it.type : (it.type === 'scene' && state.liveScene ? '场景' : '仅预览')) + '</em>' +
+                          '<em class="wp-type">' + wpTypeLabel(it, state) + '</em>' +
                         '</button>';
               }
 
-              list.innerHTML = html || '<div class="wp-empty">壁纸库是空的</div>';
+              if (!shown.length) {
+                html += mineOpen
+                  ? '<div class="wp-empty">还没有自己的素材<br><span style="font-size:11px;opacity:.75">点上面「＋ 文件夹」选一个目录，递归扫描其中的图片和视频</span></div>'
+                  : '<div class="wp-empty">壁纸库是空的<br><span style="font-size:11px;opacity:.75">订阅 Wallpaper Engine 壁纸，或到「我的」里添加文件夹</span></div>';
+              }
+
+              list.innerHTML = html;
+            }
+
+            // 目录太长只显示末两段，完整路径放 title 里
+            function shortDir(path) {
+              var parts = String(path || '').split(/[\\/]+/).filter(function (x) { return x.length; });
+              if (parts.length <= 2) return parts.join('\\');
+              return parts.slice(-2).join('\\');
             }
 
             function refresh() { return call('api/state').then(render); }
@@ -1463,7 +1598,33 @@ internal sealed class AlifeBackground
             });
 
             list.addEventListener('click', function (ev) {
-              var btn = ev.target && ev.target.closest ? ev.target.closest('.wp-item') : null;
+              var t0 = ev.target;
+              if (!t0 || !t0.closest) return;
+
+              // 「我的」页的工具条：加文件夹 / 重扫 / 打开目录 / 移除某个目录
+              if (t0.closest('.wp-adddir')) {
+                t0.closest('.wp-adddir').disabled = true;
+                call('api/pickdir').then(render);
+                return;
+              }
+
+              if (t0.closest('.wp-rescan')) {
+                call('api/rescan').then(render);
+                return;
+              }
+
+              if (t0.closest('.wp-reveal')) {
+                call('api/reveal').then(render);
+                return;
+              }
+
+              var x = t0.closest('.wp-dir-x');
+              if (x) {
+                call('api/forgetdir?path=' + encodeURIComponent(x.getAttribute('data-dir'))).then(render);
+                return;
+              }
+
+              var btn = t0.closest('.wp-item');
               if (!btn) return;
 
               call('api/switch?id=' + encodeURIComponent(btn.getAttribute('data-id'))).then(render);
@@ -1496,8 +1657,19 @@ internal sealed class AlifeBackground
 
             if (tabList) {
               tabList.addEventListener('click', function () {
-                if (!propsOpen) return;
+                if (!propsOpen && !mineOpen) return;
                 propsOpen = false;
+                mineOpen = false;
+                refresh();
+              });
+            }
+
+            // 我的：自己导入的图片 / 视频单独一页
+            if (tabMine) {
+              tabMine.addEventListener('click', function () {
+                if (mineOpen) return;
+                propsOpen = false;
+                mineOpen = true;
                 refresh();
               });
             }
@@ -1506,6 +1678,7 @@ internal sealed class AlifeBackground
               tabProps.addEventListener('click', function () {
                 if (propsOpen) return;
                 propsOpen = true;
+                mineOpen = false;
                 refresh();
               });
             }
@@ -1841,7 +2014,7 @@ internal sealed class AlifeBackground
             fit = config.ContainFit ? "contain" : "cover",
             soften = !item.IsPlayable,
             mute = config.Mute,
-            volume = Math.Clamp(config.Volume, 0, 100),
+            volume = Math.Clamp(config.Volume, 0, 200),
             opacity = Math.Clamp(config.Opacity, 0, 100) / 100.0,
             blur = Math.Clamp(config.Blur, 0, 30),
             panel = Math.Clamp(config.PanelOpacity, 0, 100) / 100.0,
@@ -2069,7 +2242,7 @@ internal sealed class AlifeBackground
         string payload = JsonSerializer.Serialize(new
         {
             mute = config.Mute,
-            volume = Math.Clamp(config.Volume, 0, 100),
+            volume = Math.Clamp(config.Volume, 0, 200),
             rate = Math.Clamp(config.PlaybackRate, 50, 200) / 100.0
         });
 
