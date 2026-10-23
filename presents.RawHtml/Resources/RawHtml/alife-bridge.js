@@ -25,14 +25,19 @@
   }
   var channel = getChannel();
 
-  // Electron 渲染进程 IPC（需 NodeIntegration=true / ContextIsolation=false）
+  // Alife 5 宿主桥：window.alifeWindow（宿主注入；postMessage 上行 / onMessage 下行）
+  var host = (window.alifeWindow && typeof window.alifeWindow.postMessage === 'function') ? window.alifeWindow : null;
+
+  // 旧版 Electron 渲染进程 IPC（仅在宿主桥缺失时兜底；WebView2 下 window.require 不存在）
   var ipc = null;
-  try {
-    if (window.require) {
-      var electron = window.require('electron');
-      if (electron && electron.ipcRenderer) ipc = electron.ipcRenderer;
-    }
-  } catch (e) { ipc = null; }
+  if (!host) {
+    try {
+      if (window.require) {
+        var electron = window.require('electron');
+        if (electron && electron.ipcRenderer) ipc = electron.ipcRenderer;
+      }
+    } catch (e) { ipc = null; }
+  }
 
   // 等价 DSH「可信模式」盾牌：允许卡片内 <script>/onclick 执行。
   // 引擎判定方式：typeof window.__vcpTrusted === 'function' && window.__vcpTrusted()
@@ -48,13 +53,25 @@
   // ---- 与 C# 的通道 ----
   function send(type, payload) {
     try {
-      if (!ipc || !channel) return;
       var msg = { type: type };
       if (payload) { for (var k in payload) msg[k] = payload[k]; }
+
+      // 宿主桥：直接投递给本窗口的 C# 实例（每个面板一个窗口，不需要频道过滤）
+      if (host) { host.postMessage(msg); return; }
+
+      if (!ipc || !channel) return;
       ipc.send(channel, JSON.stringify(msg));
     } catch (e) { /* 通道不可用时仅留在控制台 */ }
   }
   function sendLog(level, text) { send('log', { level: level, text: String(text) }); }
+
+  // ---- 自绘标题栏按钮：Alife 5 窗口没有系统标题栏，隐藏/关闭只能回传 C# 处理 ----
+  (function bindWinControls() {
+    var hide = document.getElementById('win-hide');
+    var close = document.getElementById('win-close');
+    if (hide) hide.addEventListener('click', function () { send('panelHide', null); });
+    if (close) close.addEventListener('click', function () { send('panelClose', null); });
+  })();
 
   // 前端异常/告警都回传宿主日志，避免「面板空白但插件日志毫无线索」
   window.addEventListener('error', function (ev) {
@@ -313,7 +330,17 @@
     }
   }
 
-  if (ipc && channel) {
+  if (host) {
+    // 宿主下行消息：可能是 JSON 字符串，也可能已是对象
+    host.onMessage(function (data) {
+      try {
+        var msg = (typeof data === 'string') ? JSON.parse(data) : data;
+        onHostMessage(msg);
+      } catch (e) { console.warn('[RawHtml] bad msg', e); }
+    });
+    // 通知宿主：前端已就绪（C# 收到后会推配置 + 补发排队卡片）
+    send('init', null);
+  } else if (ipc && channel) {
     ipc.on(channel, function (ev, json) {
       try { onHostMessage(JSON.parse(json)); } catch (e) { console.warn('[RawHtml] bad msg', e); }
     });
@@ -322,7 +349,7 @@
   } else {
     // 兜底：postMessage 通道（个别环境 ipcRenderer 不可用）
     window.addEventListener('message', function (ev) { onHostMessage(ev.data); });
-    console.warn('[RawHtml] ipcRenderer 不可用，回退 postMessage');
+    console.warn('[RawHtml] 宿主桥与 ipcRenderer 都不可用，回退 postMessage');
   }
 
   // 暴露给宿主/面板的回传与手动渲染入口

@@ -171,8 +171,3 @@ AI 也可直接调用 `<SaveHtmlCards name="..."/>` 把当前所有卡片一次�
   node -e "const fs=require('fs'),p='Resources/RawHtml/fonts';const fs2=require('path');const files=fs.readdirSync(p).filter(f=>f.endsWith('.woff2')).sort();const items=files.map(f=>{let b=f.replace(/\.woff2$/i,'');if(b.startsWith('Aa'))b=b.slice(2);return{alias:b.startsWith('Lanxi-')?b:'Lanxi-'+b,file:f}});fs.writeFileSync('Resources/RawHtml/fonts.css',items.map(i=>`@font-face{font-family:'${i.alias}';src:url('fonts/${encodeURIComponent(i.file)}');font-display:swap;}`).join('\n'),'utf8');fs.writeFileSync('Resources/RawHtml/fonts.json',JSON.stringify({count:items.length,fonts:items},null,1),'utf8')"
   ```
 
-
-## 源码仓库说明
-
-本目录是第一方源码镜像；`Resources/RawHtml/vendor`（KaTeX / Mermaid / ColorEngine）与 `Resources/RawHtml/fonts`（26 款 Lanxi 字体）属于第三方资源，未纳入 Git，完整可运行的包见 [Releases](https://github.com/presents0721/presents-plugins/releases)。
-

@@ -14,13 +14,19 @@
   <style>
     html, body { margin: 0; padding: 0; background: var(--panel-bg, #0f1115); color: #e7e7e7;
       font-family: ui-sans-serif, system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
-    /* 深色一体化标题栏：系统标题栏已隐藏（TitleBarStyle.hidden），这里自绘一条并作为窗口拖拽区。
-       右侧预留 150px 给系统的最小化/最大化/关闭按钮（TitleBarOverlay）。 */
+    /* 深色一体化标题栏：Alife 5 的宿主窗口没有系统标题栏，
+       所以这里的「隐藏 / 关闭」按钮由页面自绘，点击后经 alifeWindow 桥发消息给 C#。
+       （旧版 Electron 的 TitleBarOverlay 已不存在，原来预留的 150px 系统按钮区随之去掉。） */
     body { padding-top: 36px; }
     #titlebar { position: fixed; top: 0; left: 0; right: 0; height: 36px; z-index: 20;
-      display: flex; align-items: center; padding: 0 150px 0 14px; background: #171a21;
-      border-bottom: 1px solid #262b35; -webkit-app-region: drag; user-select: none; }
+      display: flex; align-items: center; padding: 0 6px 0 14px; background: #171a21;
+      border-bottom: 1px solid #262b35; user-select: none; }
     #titlebar-title { font-size: 12px; color: #9aa4b2; letter-spacing: .02em; }
+    #win-controls { margin-left: auto; display: flex; gap: 4px; }
+    .win-btn { width: 32px; height: 24px; line-height: 1; background: transparent; color: #c8cfd9;
+      border: 1px solid transparent; border-radius: 6px; cursor: pointer; font-size: 14px; padding: 0; }
+    .win-btn:hover { background: #2b3240; border-color: #3a4252; }
+    #win-close:hover { background: #7f1d1d; border-color: #b91c1c; color: #fff; }
     #toolbar { position: sticky; top: 36px; z-index: 10; display: flex; gap: 8px; align-items: center;
       padding: 8px 12px; background: #171a21; border-bottom: 1px solid #262b35; }
     #toolbar button { background: #2b3240; color: #e7e7e7; border: 1px solid #3a4252;
@@ -48,7 +54,13 @@
   </style>
 </head>
 <body>
-  <div id="titlebar"><span id="titlebar-title">Raw HTML 卡片面板</span></div>
+  <div id="titlebar">
+    <span id="titlebar-title">Raw HTML 卡片面板</span>
+    <div id="win-controls">
+      <button id="win-hide" class="win-btn" title="隐藏到系统托盘（点托盘图标恢复）">—</button>
+      <button id="win-close" class="win-btn" title="关闭面板（下次渲染卡片时自动重建）">✕</button>
+    </div>
+  </div>
   <div id="toolbar">
     <button id="btn-sample">渲染示例卡片</button>
     <button id="btn-clear">清空</button>

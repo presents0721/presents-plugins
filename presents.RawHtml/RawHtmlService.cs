@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Alife.Client;
 using Alife.Foundation;
 using Alife.Framework;
 using Alife.Function.FunctionCaller;
@@ -35,6 +36,7 @@ public class RawHtmlService(
     StorageSystem storageSystem,
     XmlFunctionCaller functionService,
     ConfigurationSystem configurationSystem,
+    IAlifeApplication alifeApplication,
     ILogger<RawHtmlService> logger,
     Interactor<RawHtmlService> interactor,
     QChatSenderService? qSender = null,        // 软依赖：未安装 / 未加载「QQ单向发送」时为 null
@@ -50,6 +52,12 @@ public class RawHtmlService(
     /// <summary>面板前端就绪前收到的卡片（alife-bridge.js 加载完成后会发来 type=init），带序号便于核对。</summary>
     private readonly List<(int Seq, string Html)> pendingCards = new();
     private volatile bool panelReady;
+
+    /// <summary>用户点了标题栏「—」把面板藏起来：只有这种情况下才需要在下张卡片时重新 Show，避免每张卡都抢焦点。</summary>
+    private volatile bool panelHidden;
+
+    /// <summary>面板隐藏后留在系统托盘的入口（点图标即恢复面板）；面板可见时为 null。</summary>
+    private TrayIconHost? trayIcon;
 
     /// <summary>卡片序号：日志与回执都带序号，便于核对「一次调用 / 一次渲染」。</summary>
     private int cardSeq;
@@ -79,7 +87,7 @@ public class RawHtmlService(
         if (stale != null)
         {
             logger.LogWarning("发现残留的 RawHtml 面板窗口（上次重载未释放），先关闭它");
-            try { stale.Dispose(); } catch { /* 忽略 */ }
+            try { await stale.DisposeAsync(); } catch { /* 忽略 */ }
         }
 
         string pluginDir = pluginSystem.PluginContext.GetPluginDirectoryPath("presents.RawHtml");
@@ -97,11 +105,8 @@ public class RawHtmlService(
         // 1) 启动 webview 面板，加载承载 vcp 引擎的 index.html
         try
         {
-            window = new RawHtmlWindow(storageSystem);
-            bridge = new PetBridge(window, logger);
-            bridge.OnMessage += OnBridgeMessage;
-            await window.CreateAsync(resourcesDir, bridge);
-            leakedWindow = window;   // 登记：万一本实例没被正常销毁，下次启动能收掉
+            if (!await EnsurePanelAsync())
+                logger.LogWarning("RawHtml 面板启动失败，函数调用仍会提示面板未就绪");
         }
         catch (Exception ex)
         {
@@ -121,6 +126,121 @@ public class RawHtmlService(
         {
             logger.LogError(ex, "RawHtml 函数注册失败");
         }
+    }
+
+    /// <summary>
+    /// 确保面板窗口存在且可见：用户点「✕」关掉后需要重建，点「—」隐藏后需要重新弹出。
+    /// 新窗口的页面加载完会发 init，排队卡片由 OnBridgeMessage("init") 补发。
+    /// </summary>
+    private async Task<bool> EnsurePanelAsync()
+    {
+        if (window == null || !window.IsCreated)
+        {
+            try
+            {
+                window = new RawHtmlWindow(alifeApplication);
+                bridge = new PetBridge(window, logger);
+                bridge.OnMessage += OnBridgeMessage;
+                await window.CreateAsync(resourcesDir, bridge);
+                leakedWindow = window;   // 登记：万一本实例没被正常销毁，下次启动能收掉
+                panelHidden = false;
+                HideTray();               // 面板已回到屏幕，撤掉隐藏时的托盘入口
+                return true;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "RawHtml 面板创建失败");
+                return false;
+            }
+        }
+
+        // 只有被用户藏起来时才 Show：常态下别每张卡片都去抢一次焦点
+        if (!panelHidden) return true;
+
+        if (await window.TryShowAsync())
+        {
+            panelHidden = false;
+            HideTray();   // 已自动弹出：托盘入口完成使命
+            return true;
+        }
+
+        // 宿主窗口没有「关闭」事件，用户直接关掉时句柄会失效：重建一个
+        await ReleasePanelAsync();
+        return await EnsurePanelAsync();
+    }
+
+    /// <summary>释放面板窗口与消息桥（用户点「✕」或插件销毁时）。排队卡片一并清空，避免重开后重放旧卡。</summary>
+    private async Task ReleasePanelAsync()
+    {
+        if (bridge != null)
+        {
+            try { bridge.OnMessage -= OnBridgeMessage; } catch { /* 忽略 */ }
+            try { bridge.Dispose(); } catch { /* 忽略 */ }
+        }
+        bridge = null;
+
+        RawHtmlWindow? w = window;
+        window = null;
+        if (w != null)
+        {
+            if (ReferenceEquals(leakedWindow, w)) leakedWindow = null;   // 正常释放：撤掉泄漏登记
+            await Task.Delay(120);   // 给在途的窗口命令一点落地时间
+            try { await w.DisposeAsync(); } catch { /* 忽略 */ }
+        }
+
+        panelReady = false;
+        panelHidden = false;
+        HideTray();   // 面板已释放：托盘入口一并撤掉
+        lock (pendingCards) pendingCards.Clear();
+    }
+
+    /// <summary>面板隐藏时挂出系统托盘图标：左键 / 「显示面板」恢复面板，「关闭面板」释放窗口。</summary>
+    private void ShowTray()
+    {
+        if (trayIcon != null) return;
+
+        trayIcon = new TrayIconHost(
+            "Raw HTML 卡片面板",
+            onShow: () => _ = RestorePanelFromTrayAsync(),
+            onClose: () => _ = ClosePanelFromTrayAsync());
+        trayIcon.Show();
+    }
+
+    /// <summary>撤掉托盘图标（面板恢复显示 / 被释放 / 插件销毁时）。</summary>
+    private void HideTray()
+    {
+        TrayIconHost? tray = trayIcon;
+        trayIcon = null;
+        tray?.Dispose();
+    }
+
+    private async Task RestorePanelFromTrayAsync()
+    {
+        HideTray();
+        panelHidden = false;
+        try
+        {
+            if (window == null || !window.IsCreated)
+            {
+                await EnsurePanelAsync();
+            }
+            else
+            {
+                await window.TryShowAsync();
+            }
+            logger.LogInformation("[RawHtml] 面板已从托盘恢复");
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "[RawHtml] 从托盘恢复面板失败");
+        }
+    }
+
+    private async Task ClosePanelFromTrayAsync()
+    {
+        HideTray();
+        logger.LogInformation("[RawHtml] 面板已从托盘关闭（下次渲染卡片时自动重建）");
+        await ReleasePanelAsync();
     }
 
     /// <summary>导出目录（保存卡片产物）：Storage/&lt;角色&gt;/RawHtml/Saved。</summary>
@@ -277,22 +397,27 @@ public class RawHtmlService(
     /// <summary>渲染一张卡片。内容模式（开闭标签包裹）+ 纯文本区：整段 HTML 原样到达，不做 XML 解析。</summary>
     [XmlFunction(FunctionMode.Content)]
     [Description("渲染一张裸 HTML 卡片：把标签内的 HTML 原样送到 Raw HTML 面板渲染成富卡片（KaTeX 公式 / Mermaid 图表 / SVG / 字体 / JS 动画 / 交互控件）。用法：<RenderHtmlCard><div id=\"vcp-root\">……</div></RenderHtmlCard>（HTML 直接写在标签内，不要放进 html 属性；一张卡一次调用）。")]
-    public Task RenderHtmlCard(XmlExecutorContext context, CancellationToken cancellationToken = default)
+    public async Task RenderHtmlCard(XmlExecutorContext context, CancellationToken cancellationToken = default)
     {
         // 开标签/正文分片都先攒着，等闭标签时一次性拿到完整 HTML（见 XmlStreamExecutor.OnTagClosed）
         if (context.CallMode != CallMode.Closing)
-            return Task.CompletedTask;
+            return;
 
         string html = context.FullContent.Trim();
         if (html.Length == 0)
         {
             interactor.Poke("未收到卡片内容，已忽略。");
-            return Task.CompletedTask;
+            return;
         }
-        if (bridge == null || window == null)
+
+        // 面板被用户关掉/还没起来时重建（宿主没有窗口关闭事件，只能在这里按需兜底）
+        if (bridge == null || window == null || !window.IsCreated)
         {
-            interactor.Poke("Raw HTML 面板未启动，无法渲染。请检查插件日志。");
-            return Task.CompletedTask;
+            if (!await EnsurePanelAsync())
+            {
+                interactor.Poke("Raw HTML 面板未启动，无法渲染。请检查插件日志。");
+                return;
+            }
         }
         int seq = Interlocked.Increment(ref cardSeq);
         try
@@ -304,7 +429,7 @@ public class RawHtmlService(
                 lock (pendingCards) pendingCards.Add((seq, html));
                 logger.LogInformation("[RawHtml] 卡片 #{Seq}（{Length} 字符）面板未就绪，已排队", seq, html.Length);
                 interactor.Poke($"面板仍在加载，卡片 #{seq} 已排队，就绪后会自动渲染。");
-                return Task.CompletedTask;
+                return;
             }
             logger.LogInformation("[RawHtml] 卡片 #{Seq}（{Length} 字符）已下发渲染", seq, html.Length);
             bridge.SendMessage("renderHtml", new { html = html, seq = seq });
@@ -315,7 +440,6 @@ public class RawHtmlService(
             logger.LogError(ex, "[RawHtml] 卡片 #{Seq} 下发失败", seq);
             interactor.Poke("渲染指令发送失败：" + ex.Message);
         }
-        return Task.CompletedTask;
     }
 
     [XmlFunction(FunctionMode.OneShot)]
@@ -869,6 +993,16 @@ public class RawHtmlService(
                 case "panelRequestState":
                     SendPanelState();
                     break;
+                case "panelHide":               // 标题栏「—」：隐藏到托盘，点托盘图标恢复
+                    panelHidden = true;
+                    if (window != null) await window.HideAsync();
+                    ShowTray();
+                    logger.LogInformation("[RawHtml] 面板已隐藏到托盘（点托盘图标或下张卡片时恢复）");
+                    break;
+                case "panelClose":              // 标题栏「✕」：关掉窗口；下次渲染卡片时自动重建
+                    logger.LogInformation("[RawHtml] 面板已关闭（下次渲染卡片时自动重建）");
+                    await ReleasePanelAsync();
+                    break;
                 case "panelSetRender":
                     SetRender(Flag("value"));
                     break;
@@ -905,29 +1039,12 @@ public class RawHtmlService(
                     }
                     break;
                 }
-                case "panelSavePdf":           // 导出整页为 PDF（Electron 打印，保留背景）
+                case "panelSavePdf":           // 导出整页为 PDF：Alife 5 的窗口接口没有打印能力，只能提示
                 {
-                    string fileName = SafeFileName(Str("name"), Str("style"));
-                    string path = Path.Combine(SaveDir, fileName);
-                    try
-                    {
-                        Directory.CreateDirectory(SaveDir);
-                        if (window != null)
-                        {
-                            await window.Window.WebContents.PrintToPDFAsync(path, new ElectronNET.API.Entities.PrintToPDFOptions {
-                                PrintBackground = true,
-                                Landscape = false
-                            });
-                            logger.LogInformation("[RawHtml] 已保存 PDF：{Path}", path);
-                            bridge?.SendMessage("toast", new { text = "已保存 PDF：" + path });
-                        }
-                        else bridge?.SendMessage("toast", new { text = "面板未启动，无法导出 PDF" });
-                    }
-                    catch (Exception e)
-                    {
-                        logger.LogError(e, "[RawHtml] 保存 PDF 失败");
-                        bridge?.SendMessage("toast", new { text = "PDF 保存失败：" + e.Message });
-                    }
+                    // 旧版走 Electron 的 WebContents.PrintToPDFAsync；IAlifeWindow 没有对应接口，
+                    // 这里不假装成功，直接让前端改用仍可用的「导出 PNG」。
+                    logger.LogWarning("[RawHtml] 已忽略导出 PDF：Alife 5 窗口接口不支持打印");
+                    bridge?.SendMessage("toast", new { text = "当前版本不支持导出 PDF，请用「导出 PNG」" });
                     break;
                 }
                 case "panelSavePng":            // 前端用 SVG→canvas 栅格化后传来的 base64 PNG
@@ -1016,23 +1133,8 @@ public class RawHtmlService(
 
     protected override async Task OnDestroy()
     {
-        // 先摘回调，再关窗口：避免在途消息打到已销毁的 BrowserWindow（主进程会抛 BrowserWindow not found）
-        if (bridge != null)
-        {
-            try { bridge.OnMessage -= OnBridgeMessage; } catch { /* 忽略 */ }
-            try { bridge.Dispose(); } catch { /* 忽略 */ }
-        }
-        bridge = null;
-        RawHtmlWindow? w = window;
-        window = null;
-        if (w != null)
-        {
-            if (ReferenceEquals(leakedWindow, w)) leakedWindow = null;   // 正常释放：撤掉泄漏登记
-            await Task.Delay(150);   // 给在途的窗口命令一点落地时间
-            try { w.Dispose(); } catch { /* 忽略 */ }
-        }
-        panelReady = false;
-        lock (pendingCards) pendingCards.Clear();
+        // 先摘回调，再关窗口：避免在途消息打到已释放的窗口
+        await ReleasePanelAsync();
         await base.OnDestroy();
     }
 }
