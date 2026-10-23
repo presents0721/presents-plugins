@@ -1,16 +1,27 @@
-// ---- Electron 通讯 ----
+// ---- 宿主桥通讯 ----
 
-// 每个桌宠实例使用独立的 IPC 频道，避免多开时消息互相串扰
-var petChannel = new URLSearchParams(location.search).get('petChannel') || 'pet';
-
-function getIpc() {
-    var electron = require('electron');
-    return electron.ipcRenderer;
+// Alife 5：宿主在每个窗口内注入 window.alifeWindow 桥，不再有 Node/IPC 频道。
+// 多开时每个窗口各自独立，消息天然不会串扰。
+function alifeBridge() {
+    try {
+        return window.alifeWindow || null;
+    } catch {
+        return null;
+    }
 }
 
 function postMessage(data) {
     try {
-        getIpc().send(petChannel, JSON.stringify(data));
+        var bridge = alifeBridge();
+        if (bridge) {
+            bridge.postMessage(data);
+            return;
+        }
+    } catch {
+    }
+    // 桥不可用时的兜底：用引导脚本保存的发送器，至少能把错误原因告到主进程
+    try {
+        if (window.__petRawSend) window.__petRawSend(data);
     } catch {
     }
 }
@@ -31,7 +42,7 @@ const messageBus = {
     }
 };
 
-getIpc().on(petChannel, function (event, msg) {
+function onBridgeMessage(msg) {
     if (typeof msg === 'string') {
         try {
             msg = JSON.parse(msg);
@@ -39,8 +50,22 @@ getIpc().on(petChannel, function (event, msg) {
             return;
         }
     }
+    if (!msg || !msg.type) return;
     messageBus._dispatch(msg);
-});
+}
+
+(function bindBridge() {
+    var bridge = alifeBridge();
+    if (!bridge) {
+        console.error('[Pet] window.alifeWindow 不可用：桌宠无法与主进程通讯');
+        return;
+    }
+    try {
+        bridge.onMessage(onBridgeMessage);
+    } catch (e) {
+        console.error('[Pet] 绑定宿主桥失败:', e);
+    }
+})();
 
 
 // ---- 前端日志转发 ----
@@ -113,17 +138,29 @@ messageBus.on('load', function (msg) {
     loadModel(msg.url, msg.pins);
 });
 
-const app = new PIXI.Application({
-    view: document.getElementById('canvas'),
-    autoStart: true,
-    resizeTo: window,
-    transparent: true,
-    backgroundAlpha: 0,
-    // 按屏幕 DPI 渲染：不设的话画布按 1 倍像素画，再被系统放大到实际显示尺寸 → 整只模型发糊
-    resolution: window.devicePixelRatio || 1,
-    autoDensity: true,
-    preserveDrawingBuffer: true, // 保留帧缓冲，允许读取像素（生成人形掩码）
-});
+// 创建渲染器失败（显卡驱动异常 / 远程桌面或虚拟机没有 WebGL）时页面会直接停在这里，
+// 主进程只能看到「30 秒等不到 init」。这里先明确报出原因，方便用户判断是环境问题。
+let app;
+try {
+    app = new PIXI.Application({
+        view: document.getElementById('canvas'),
+        autoStart: true,
+        resizeTo: window,
+        transparent: true,
+        backgroundAlpha: 0,
+        // 按屏幕 DPI 渲染：不设的话画布按 1 倍像素画，再被系统放大到实际显示尺寸 → 整只模型发糊
+        resolution: window.devicePixelRatio || 1,
+        autoDensity: true,
+        preserveDrawingBuffer: true, // 保留帧缓冲，允许读取像素（生成人形掩码）
+    });
+} catch (e) {
+    postMessage({
+        type: 'log',
+        level: 'error',
+        text: '[Pet] 创建 WebGL 渲染器失败，桌宠无法显示（常见原因：远程桌面 / 虚拟机 / 显卡驱动不支持 WebGL，或硬件加速被关闭）：' + (e && (e.message || e))
+    });
+    throw e;
+}
 
 let model = null;
 

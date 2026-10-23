@@ -6,7 +6,7 @@ using System.Text.Json;
 using System.Threading;
 using Alife.Foundation;
 using Alife.Framework;
-using ElectronNET.API.Entities;
+using System.Drawing;
 
 namespace presents.EmotionLive2DPet;
 
@@ -1465,7 +1465,7 @@ polygon.region-box.selected { fill:rgba(238,0,102,0.15); stroke:#e06; }
         b.X += dx;
         b.Y += dy;
         foreverStart = b;
-        window.Window.SetBounds(b);
+        _ = window.SetBoundsAsync(b);
     }
 
     public void SaveRegions(List<PetRegionConfig> regions)

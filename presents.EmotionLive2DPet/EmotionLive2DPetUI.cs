@@ -163,9 +163,14 @@ public sealed class EmotionLive2DPetUI : ModuleUIBase<EmotionLive2DPet, EmotionL
         string[]? picked = null;
         try
         {
-            picked = Module != null
-                ? await Module.PickFolderAsync("选择模型文件夹（会递归扫描其中的 *.model3.json）")
-                : await EmotionLive2DPet.PickFolderAsync("选择模型文件夹（会递归扫描其中的 *.model3.json）", null);
+            if (Module == null)
+            {
+                message = "插件尚未启动，无法打开文件夹选择框；也可以把路径粘贴到下面「额外模型目录」";
+                await InvokeAsync(StateHasChanged);
+                return;
+            }
+
+            picked = await Module.PickFolderAsync("选择模型文件夹（会递归扫描其中的 *.model3.json）");
         }
         catch (Exception e)
         {

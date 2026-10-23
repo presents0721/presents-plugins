@@ -2,16 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading.Tasks;
-using ElectronNET.API;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json.Linq;
 
 namespace presents.EmotionLive2DPet;
 
 /// <summary>
-/// 桌宠主进程 ⇄ 渲染进程的 Electron IPC 桥。
-/// 频道为该桌宠实例独有的 <see cref="PetWindow.ChannelId"/>，信封对象为 { type: string, ...payload }。
-/// 渲染进程 → 主进程消息经 <see cref="OnMessage"/> 事件分发。
+/// 桌宠主进程 ⇄ 渲染进程的桥（Alife 5：每个窗口自带 window.alifeWindow，不再有 IPC 频道）。
+/// 信封对象为 { type: string, ...payload }：主进程经 PostMessageAsync 下发，渲染进程上报的消息由
+/// <see cref="PetWindow"/> 解析后经 <see cref="OnMessage"/> 分发。
 /// </summary>
 public sealed class PetBridge : IDisposable
 {
@@ -29,7 +28,9 @@ public sealed class PetBridge : IDisposable
                 foreach (KeyValuePair<string, JToken?> kvp in payloadObj)
                     envelope[kvp.Key] = kvp.Value;
             }
-            Electron.IpcMain.Send(window.Window, window.ChannelId, envelope.ToString(Newtonsoft.Json.Formatting.Indented));
+
+            string json = envelope.ToString(Newtonsoft.Json.Formatting.None);
+            _ = window.Window.PostMessageAsync(json);
         }
         catch (Exception ex)
         {
@@ -38,18 +39,7 @@ public sealed class PetBridge : IDisposable
     }
 
     /// <summary>在渲染进程执行 JS 并返回结果。</summary>
-    public async Task<string?> ExecuteJavaScriptAsync(string script)
-    {
-        try
-        {
-            return await window.Window.WebContents.ExecuteJavaScriptAsync<string>(script, true);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "执行桌宠脚本失败");
-            return null;
-        }
-    }
+    public Task<string?> ExecuteJavaScriptAsync(string script) => window.ExecuteJavaScriptAsync(script);
 
     readonly PetWindow window;
     readonly ILogger<EmotionLive2DPet> logger;
@@ -58,45 +48,22 @@ public sealed class PetBridge : IDisposable
     {
         this.window = window;
         this.logger = logger;
-        Electron.IpcMain.On(window.ChannelId, OnIpcMessage);
+        window.OnMessage += Forward;
     }
     public void Dispose()
     {
-        Electron.IpcMain.RemoveAllListeners(window.ChannelId);
+        window.OnMessage -= Forward;
     }
 
-    void OnIpcMessage(object? payload)
+    void Forward(string type, JsonElement payload)
     {
-        // logger.LogInformation(payload?.ToString());
-
-        if (payload is not string json)
-            return;
-        if (string.IsNullOrEmpty(json))
-            return;
-
         try
         {
-            using JsonDocument doc = JsonDocument.Parse(json);
-            JsonElement root = doc.RootElement;
-            if (root.TryGetProperty("type", out JsonElement typeProp) == false)
-                return;
-
-            string? type = typeProp.GetString();
-            if (type == null)
-                return;
-
-            try
-            {
-                OnMessage?.Invoke(type, root);
-            }
-            catch (Exception e)
-            {
-                logger.LogError(e, "执行桌宠前端消息回调失败");
-            }
+            OnMessage?.Invoke(type, payload);
         }
-        catch (Exception ex)
+        catch (Exception e)
         {
-            logger.LogError(ex, "解析桌宠前端消息失败");
+            logger.LogError(e, "执行桌宠前端消息回调失败");
         }
     }
 }

@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Alife.Foundation;
-using ElectronNET.API.Entities;
 
 namespace presents.EmotionLive2DPet;
 
@@ -129,6 +129,11 @@ public class MouseThroughModule : IPetModule, IDisposable
     CancellationTokenSource? cancellationTokenSource;
     bool mouseThrough; // false=常态(智能穿透), true=穿透态
     string corner = "right";
+    // Alife 5 用「可交互区域」表达穿透：区域之外点击直接落给桌面。
+    // 区域只在内容变化时重算（每 50ms 重建上百个矩形没必要）。
+    bool regionsDirty = true;
+    bool lastEditMode;
+    int regionFailures;
 
     // 人形掩码（窗口内降采样网格，前端上报）：识别不规则人形轮廓（含间隙），非矩形
     int maskGw, maskGh;
@@ -164,6 +169,10 @@ public class MouseThroughModule : IPetModule, IDisposable
 
     void OnBridgeMessage(string type, JsonElement data)
     {
+        // 影响可交互区域的内容变了，下一轮穿透刷新时重算
+        if (type is "body_mask" or "btn_bounds" or "ui_bounds" or "lock_toggle" or "forever_dblclick")
+            regionsDirty = true;
+
         switch (type)
         {
             case "lock_ready":
@@ -253,6 +262,7 @@ public class MouseThroughModule : IPetModule, IDisposable
     public void SetMouseThrough(bool enabled)
     {
         mouseThrough = enabled;
+        regionsDirty = true;
         bridge.SendMessage("lock_state", new { on = mouseThrough });
         // 常态/穿透态都持续运行智能穿透循环（不 StopLoop）
         if (cancellationTokenSource == null)
@@ -277,7 +287,7 @@ public class MouseThroughModule : IPetModule, IDisposable
 
     async void MouseThroughLoop(CancellationToken cancellationToken)
     {
-        int consecutiveFailures = 0;
+        int idleTicks = 0;
         try
         {
             while (cancellationToken.IsCancellationRequested == false)
@@ -286,19 +296,22 @@ public class MouseThroughModule : IPetModule, IDisposable
                 try
                 {
                     ApplyIgnoreState();
-                    consecutiveFailures = 0;
+
+                    // 主进程驱动按钮"靠近才显示"（穿透态下前端收不到 mousemove，由全局光标轮询判定）
+                    Rectangle b = window.Bounds;
+                    Point c = window.CursorScreenPoint;
+                    SendBtnNear(c.X - b.X, c.Y - b.Y);
+
+                    // 兜底：每秒强制重算一次区域（窗口尺寸/视图变化后前端可能来不及重报）
+                    if (++idleTicks >= 20)
+                    {
+                        idleTicks = 0;
+                        regionsDirty = true;
+                    }
                 }
                 catch (Exception)
                 {
-                    // IPC 瞬时拥堵（穿透切换瞬间可能 >1s）：单次失败不能让穿透循环退出，
-                    // 否则窗口会永久卡在最后一次 SetIgnoreMouseEvents 的状态（常见：全穿透）。
-                    // 连续失败时把窗口拉回不穿透，宁可短暂挡一下桌面也不能永久穿透。
-                    consecutiveFailures++;
-                    if (consecutiveFailures >= 3)
-                    {
-                        try { window.Window.SetIgnoreMouseEvents(false); } catch { }
-                        consecutiveFailures = 0;
-                    }
+                    // 单次失败不能让循环退出，否则窗口会永久卡在上一次的区域状态
                 }
             }
         }
@@ -309,36 +322,110 @@ public class MouseThroughModule : IPetModule, IDisposable
         }
     }
 
+    /// <summary>
+    /// 按当前状态刷新「可交互区域」。Alife 5 没有整窗鼠标事件开关，
+    /// 而是声明哪些窗口内矩形接收输入，其余位置的点击直接落给桌面。
+    /// </summary>
     void ApplyIgnoreState()
     {
         // 编辑模式：整窗强制可交互（暂停智能穿透），否则画框/拖动手柄收不到鼠标事件
-        if (hub.EditMode)
+        bool edit = hub.EditMode;
+        if (edit != lastEditMode) { lastEditMode = edit; regionsDirty = true; }
+        if (edit)
         {
-            window.Window.SetIgnoreMouseEvents(false);
+            if (regionsDirty) { regionsDirty = false; PushInputRegions(null); }
             return;
         }
 
-        Rectangle b = window.Bounds;
-        Point c = window.CursorScreenPoint;
-        double cx = c.X - b.X; // 窗口内坐标
-        double cy = c.Y - b.Y;
+        if (regionsDirty == false) return;
+        regionsDirty = false;
+        PushInputRegions(BuildInputRegions());
+    }
 
-        bool interactive;
+    Rectangle[] BuildInputRegions()
+    {
+        List<Rectangle> list = new();
+
+        // 人形掩码：按行合并连续格子，减少矩形数量
+        if (mouseThrough == false && hasBody && maskBits != null)
+        {
+            for (int gy = 0; gy < maskGh; gy++)
+            {
+                int runStart = -1;
+                for (int gx = 0; gx <= maskGw; gx++)
+                {
+                    bool filled = gx < maskGw && maskBits[gy * maskGw + gx];
+                    if (filled && runStart < 0) runStart = gx;
+                    else if (filled == false && runStart >= 0)
+                    {
+                        list.Add(new Rectangle(runStart * MaskStep, gy * MaskStep, (gx - runStart) * MaskStep, MaskStep));
+                        runStart = -1;
+                    }
+                }
+            }
+        }
+
+        // 互动区（模型坐标 → 窗口坐标）：常态才接收；穿透态下只有永久区
         if (mouseThrough == false)
         {
-            // 常态：人形 + 互动区 + 永久区 + 按钮 + 弹层 不穿透
-            interactive = InBody(cx, cy) || InRegions(cx, cy) || InForever(cx, cy) || InButtons(cx, cy) || InUi(cx, cy);
+            foreach (PetRegionConfig region in regionModule.GetRegions())
+                AddRegionRect(list, region);
         }
-        else
+        AddRegionRect(list, regionModule.GetForeverRegion());
+
+        // 按钮 + 弹层（窗口内坐标，直接可用）
+        lock (buttonsLock)
         {
-            // 穿透态：仅永久区 + 按钮 + 弹层 不穿透
-            interactive = InForever(cx, cy) || InButtons(cx, cy) || InUi(cx, cy);
+            foreach ((string Id, double X, double Y, double W, double H) btn in buttons)
+                AddRect(list, btn.X, btn.Y, btn.W, btn.H);
+        }
+        lock (uiLock)
+        {
+            foreach ((string Id, double X, double Y, double W, double H) ui in uiRects)
+                AddRect(list, ui.X, ui.Y, ui.W, ui.H);
         }
 
-        window.Window.SetIgnoreMouseEvents(!interactive);
+        return list.ToArray();
+    }
 
-        // 主进程驱动按钮"靠近才显示"（穿透态下前端收不到 mousemove，由全局光标轮询判定）
-        SendBtnNear(cx, cy);
+    void AddRegionRect(List<Rectangle> list, PetRegionConfig region)
+    {
+        (double x1, double y1) = regionModule.ToWindow(region.MinX, region.MinY);
+        (double x2, double y2) = regionModule.ToWindow(region.MaxX, region.MaxY);
+        AddRect(list, Math.Min(x1, x2), Math.Min(y1, y2), Math.Abs(x2 - x1), Math.Abs(y2 - y1));
+    }
+
+    static void AddRect(List<Rectangle> list, double x, double y, double w, double h)
+    {
+        if (w <= 0 || h <= 0) return;
+        list.Add(Rectangle.FromLTRB(
+            (int)Math.Floor(x),
+            (int)Math.Floor(y),
+            (int)Math.Ceiling(x + w),
+            (int)Math.Ceiling(y + h)));
+    }
+
+    void PushInputRegions(Rectangle[]? regions) => _ = SetInputRegionsAsync(regions);
+
+    async Task SetInputRegionsAsync(Rectangle[]? regions)
+    {
+        try
+        {
+            await window.SetInputRegionsAsync(regions);
+            regionFailures = 0;
+        }
+        catch (Exception e)
+        {
+            // 单次失败不致命；连续失败就把窗口拉回整窗可交互，
+            // 宁可短暂挡一下桌面也不能永久穿透（那样按钮就点不到了）。
+            regionFailures++;
+            if (regionFailures >= 3)
+            {
+                regionFailures = 0;
+                try { await window.SetInputRegionsAsync(null); } catch { }
+            }
+            AlifeLog.LogWarning("刷新桌宠穿透区域失败：" + e.Message);
+        }
     }
 
     /// <summary>主进程按钮靠近判定：发给前端 btn_near 消息，前端据此设 .near 类（靠近才显示）。</summary>
@@ -359,57 +446,4 @@ public class MouseThroughModule : IPetModule, IDisposable
         bridge.SendMessage("btn_near", new { states });
     }
 
-    bool InBody(double cx, double cy)
-    {
-        if (hasBody == false || maskBits == null) return false;
-        int gx = Math.Min(maskGw - 1, Math.Max(0, (int)(cx / MaskStep)));
-        int gy = Math.Min(maskGh - 1, Math.Max(0, (int)(cy / MaskStep)));
-        return maskBits[gy * maskGw + gx];
-    }
-
-    bool InRegions(double cx, double cy)
-    {
-        // 区域存的是模型单位坐标，先经视图换算再匹配（缩放/移动/窗口变化后仍贴合）
-        (double ux, double uy) = regionModule.ToCalibrated(cx, cy);
-        foreach (PetRegionConfig r in regionModule.GetRegions())
-        {
-            if (r.Contains(ux, uy)) return true;
-        }
-        return false;
-    }
-
-    bool InForever(double cx, double cy)
-    {
-        (double ux, double uy) = regionModule.ToCalibrated(cx, cy);
-        PetRegionConfig f = regionModule.GetForeverRegion();
-        return f.Contains(ux, uy);
-    }
-
-    bool InButtons(double cx, double cy)
-    {
-        lock (buttonsLock)
-        {
-            foreach ((string Id, double X, double Y, double W, double H) btn in buttons)
-            {
-                double r = Math.Max(btn.W, btn.H) / 2 + BtnProximity;
-                double bx = btn.X + btn.W / 2, by = btn.Y + btn.H / 2;
-                double dx = cx - bx, dy = cy - by;
-                if (dx * dx + dy * dy <= r * r) return true;
-            }
-        }
-        return false;
-    }
-
-    /// <summary>弹层/面板区（设置面板、右键菜单）：显示期间必须精确可点击（不含"靠近"余量）。</summary>
-    bool InUi(double cx, double cy)
-    {
-        lock (uiLock)
-        {
-            foreach ((string Id, double X, double Y, double W, double H) r in uiRects)
-            {
-                if (cx >= r.X && cx <= r.X + r.W && cy >= r.Y && cy <= r.Y + r.H) return true;
-            }
-        }
-        return false;
-    }
 }

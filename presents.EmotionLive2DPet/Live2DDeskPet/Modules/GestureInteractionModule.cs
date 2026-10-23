@@ -1,15 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Threading;
+using System.Windows.Forms;
 using Alife.Foundation;
 using Alife.Framework;
-using ElectronNET.API;
-using ElectronNET.API.Entities;
-using System.Windows.Forms;
 
 namespace presents.EmotionLive2DPet;
 
@@ -365,8 +363,7 @@ public class GestureInteractionModule : IPetModule, IDisposable
         bridge.OnMessage += OnMessage;
         window.MouseMoved += OnMouseMoved;
         desktopTimer = new System.Threading.Timer(_ => DesktopTick(), null, 2000, 2000);
-        CreateTray();
-        RegisterHotkeys();
+        CreateTray();   // 托盘线程里同时注册全局热键（WM_HOTKEY 依赖该线程的消息泵）
         SendSettings();
     }
 
@@ -494,7 +491,8 @@ public class GestureInteractionModule : IPetModule, IDisposable
             }
             if (hub.EditMode) return;
             Rectangle b = window.Bounds;
-            int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+            Size screen = window.ScreenSize;
+            int sw = screen.Width, sh = screen.Height;
             if (hub.IsOn("edge"))
             {
                 const int Sn = 8;
@@ -507,7 +505,7 @@ public class GestureInteractionModule : IPetModule, IDisposable
                 {
                     edgeLatched = true;
                     b.X = nx; b.Y = ny;
-                    window.Window.SetBounds(b);
+                    _ = window.SetBoundsAsync(b);
                     if (Allow("edge", 15000)) hub.Report("桌宠被拖到屏幕边缘贴住了");
                 }
                 else if (!near) edgeLatched = false;
@@ -531,13 +529,14 @@ public class GestureInteractionModule : IPetModule, IDisposable
         try
         {
             Rectangle b = window.Bounds;
-            int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+            Size screen = window.ScreenSize;
+            int sw = screen.Width, sh = screen.Height;
             int tx = sw - b.Width - 60, ty = sh - b.Height;
             while (Math.Abs(b.X - tx) + Math.Abs(b.Y - ty) > 6)
             {
                 b.X += Math.Sign(tx - b.X) * Math.Min(24, Math.Abs(tx - b.X));
                 b.Y += Math.Sign(ty - b.Y) * Math.Min(24, Math.Abs(ty - b.Y));
-                window.Window.SetBounds(b);
+                _ = window.SetBoundsAsync(b);
                 await System.Threading.Tasks.Task.Delay(16);
             }
         }
@@ -558,16 +557,16 @@ public class GestureInteractionModule : IPetModule, IDisposable
         {
             if (hide)
             {
-                window.Window.Hide();
+                _ = window.HideAsync();
                 petHidden = true;
                 NotifyHidden();
             }
             else if (petHidden)
             {
-                window.Window.Show();
+                _ = window.ShowAsync();
                 petHidden = false;
-                // 隐藏再显示后置顶层级可能被 Electron 重置，补一次，避免被其他窗口盖住
-                try { window.Window.SetAlwaysOnTop(true, (OnTopLevel)7, 1); } catch { }
+                // 隐藏再显示后置顶状态可能被宿主重置，补一次，避免被其他窗口盖住
+                _ = window.SetTopMostAsync(true);
             }
         }
         catch (Exception e) { AlifeLog.LogWarning("[Live2D桌宠] 切换显隐失败：" + e.Message); }
@@ -582,7 +581,7 @@ public class GestureInteractionModule : IPetModule, IDisposable
         {
             if (petHidden)
             {
-                window.Window.Show();
+                _ = window.ShowAsync();
                 petHidden = false;
             }
             bridge.SendMessage("pet_settings_open", new { });
@@ -657,6 +656,7 @@ public class GestureInteractionModule : IPetModule, IDisposable
                     petTray = tray;
                     trayReady = true;
                     AlifeLog.LogInformation("[Live2D桌宠] 系统托盘已就绪（躲起来后可从托盘唤回）");
+                    RegisterHotkeys();   // 热键消息由本线程的消息泵分发
                     Application.Run();   // 本 STA 线程的消息泵，支撑托盘菜单与点击
                 }
                 catch (Exception e) { AlifeLog.LogWarning("[Live2D桌宠] 托盘线程内失败：" + e.Message); }
@@ -689,6 +689,7 @@ public class GestureInteractionModule : IPetModule, IDisposable
                         if (tray is not null) { tray.Visible = false; tray.Dispose(); }
                     }
                     catch { }
+                    try { UnregisterHotkeys(); } catch { }
                     try { System.Windows.Forms.Application.Exit(); } catch { }
                 }, null);
             }
@@ -700,44 +701,66 @@ public class GestureInteractionModule : IPetModule, IDisposable
         catch { }
     }
 
-    [DllImport("user32.dll")] static extern int GetSystemMetrics(int nIndex);
-    const int SM_CXSCREEN = 0, SM_CYSCREEN = 1;
+    // Alife 5 宿主删除 Electron，全局热键改用 Win32 RegisterHotKey 实现（MOD_CONTROL|MOD_ALT + 按键）。
+    // 同一热键二次注册会返回失败，这里静默忽略即可；注销在 Dispose 统一处理。
+    const uint MOD_ALT = 0x0001, MOD_CONTROL = 0x0002;
+    const uint WM_HOTKEY = 0x0312;
+    const int HWND_MESSAGE = -3;
+    static IntPtr msgWnd;
+    static Dictionary<int, Action> hotkeyHandlers = new();
+    static int nextHotkeyId = 0xC000;
+    // 窗口类注册后系统只保留函数指针，必须用静态字段持有托管委托，否则被 GC 回收时会崩
+    static readonly WndProcDelegate WndProcRef = WndProc;
+
+    static bool RegisterGlobalHotkey(int key, Action action)
+    {
+        // 用消息窗口（HWND_MESSAGE）承载通知，不侵入主线程窗口
+        if (msgWnd == IntPtr.Zero)
+        {
+            string cls = Guid.NewGuid().ToString("N");
+            IntPtr hInstance = GetModuleHandleW(null);
+            WNDCLASS wc = new() { lpfnWndProc = WndProcRef, lpszClassName = cls, hInstance = hInstance };
+            RegisterClassW(ref wc);
+            msgWnd = CreateWindowExW(0, cls, "PetHotkey", 0, 0, 0, 0, 0, HWND_MESSAGE, IntPtr.Zero, hInstance, IntPtr.Zero);
+        }
+        int id = nextHotkeyId++;
+        if (!RegisterHotKey(msgWnd, id, MOD_CONTROL | MOD_ALT, (uint)key)) return false;
+        hotkeyHandlers[id] = action;
+        return true;
+    }
+
+    /// <summary>释放全部热键（须在创建消息窗口的同一条线程上调用）。</summary>
+    static void UnregisterHotkeys()
+    {
+        foreach (int id in hotkeyHandlers.Keys)
+        {
+            try { UnregisterHotKey(msgWnd, id); } catch { }
+        }
+        hotkeyHandlers.Clear();
+        if (msgWnd != IntPtr.Zero)
+        {
+            try { DestroyWindow(msgWnd); } catch { }
+            msgWnd = IntPtr.Zero;
+        }
+    }
+
+    static IntPtr WndProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        if (msg == WM_HOTKEY && hotkeyHandlers.TryGetValue((int)wParam, out Action? action))
+        {
+            try { action?.Invoke(); } catch { }
+            return IntPtr.Zero;
+        }
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
 
     void RegisterHotkeys()
     {
         try
         {
-            PropertyInfo? gsProp = typeof(Electron).GetProperty("GlobalShortcut", BindingFlags.Public | BindingFlags.Static);
-            object? gs = gsProp?.GetValue(null);
-            if (gs == null)
-            {
-                AlifeLog.LogWarning("[Live2D桌宠] 取不到 Electron.GlobalShortcut，显隐热键不可用（可用系统托盘唤回桌宠）");
-                return;
-            }
-            Type t = gs.GetType();
-            bool Reg(string accel, Action cb)
-            {
-                try
-                {
-                    MethodInfo? m = t.GetMethod("Register", new[] { typeof(string), typeof(Action) })
-                                 ?? t.GetMethod("RegisterAsync", new[] { typeof(string), typeof(Action) });
-                    if (m is null)
-                    {
-                        AlifeLog.LogWarning("[Live2D桌宠] GlobalShortcut 缺少 Register 方法，热键 " + accel + " 未注册");
-                        return false;
-                    }
-                    m.Invoke(gs, new object[] { accel, cb });
-                    return true;
-                }
-                catch (Exception e)
-                {
-                    AlifeLog.LogWarning("桌宠热键注册失败(" + accel + "): " + e.Message);
-                    return false;
-                }
-            }
-            Reg("CommandOrControl+Alt+P", () => { if (hub.IsOn("hotkey")) hub.Report("哥哥用热键戳了我一下"); });
-            Reg("CommandOrControl+Alt+M", () => { if (hub.IsOn("hotkey")) hub.Report("哥哥用热键让我安静一会儿"); });
-            hotkeyHideRegistered = Reg("CommandOrControl+Alt+H", () => HidePet(!petHidden));
+            RegisterKey("P", () => { if (hub.IsOn("hotkey")) hub.Report("哥哥用热键戳了我一下"); });
+            RegisterKey("M", () => { if (hub.IsOn("hotkey")) hub.Report("哥哥用热键让我安静一会儿"); });
+            hotkeyHideRegistered = RegisterKey("H", () => HidePet(!petHidden));
             if (!hotkeyHideRegistered)
                 AlifeLog.LogWarning("[Live2D桌宠] 显隐热键未注册，请用系统托盘的「显示 / 隐藏」唤回桌宠");
         }
@@ -746,4 +769,25 @@ public class GestureInteractionModule : IPetModule, IDisposable
             AlifeLog.LogWarning("桌宠全局热键初始化失败: " + e.Message);
         }
     }
+
+    bool RegisterKey(string ch, Action callback)
+    {
+        try { return RegisterGlobalHotkey(char.ToUpperInvariant(ch[0]), callback); }
+        catch (Exception e)
+        {
+            AlifeLog.LogWarning("桌宠热键注册失败(Ctrl+Alt+" + ch + "): " + e.Message);
+            return false;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct WNDCLASS { public uint style; public WndProcDelegate lpfnWndProc; public int cbClsExtra, cbWndExtra; public IntPtr hInstance, hIcon, hCursor, hbrBackground; [MarshalAs(UnmanagedType.LPWStr)] public string lpszMenuName; [MarshalAs(UnmanagedType.LPWStr)] public string lpszClassName; }
+    delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern ushort RegisterClassW(ref WNDCLASS wc);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateWindowExW(uint exStyle, string cls, string name, uint style, int x, int y, int w, int h, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr param);
+    [DllImport("user32.dll")] static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint vk);
+    [DllImport("user32.dll")] static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] static extern IntPtr DefWindowProcW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandleW(string? name);
 }

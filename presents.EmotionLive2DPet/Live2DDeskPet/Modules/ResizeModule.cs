@@ -1,6 +1,6 @@
 using System;
+using System.Drawing;
 using System.Text.Json;
-using ElectronNET.API.Entities;
 
 namespace presents.EmotionLive2DPet;
 
@@ -31,25 +31,33 @@ public class ResizeModule : IPetModule, IDisposable
     public string JsCode => @"
 (function() {
     var btn = document.getElementById('resize-btn');
+    var start = null;
     btn.addEventListener('pointerdown', function(e) {
         btn.setPointerCapture(e.pointerId);
+        start = {id:e.pointerId, x:e.screenX, y:e.screenY};
         postMessage({type:'resize_start'});
     });
     btn.addEventListener('pointermove', function(e) {
-        if (btn.hasPointerCapture(e.pointerId)) {
-            postMessage({type:'resize_delta',dx:e.movementX,dy:e.movementY});
+        if (start && start.id === e.pointerId) {
+            postMessage({type:'resize_delta',dx:Math.round(e.screenX-start.x),dy:Math.round(e.screenY-start.y)});
         }
     });
+    function end(e) { if (start && start.id === e.pointerId) start = null; }
     btn.addEventListener('pointerup', function(e) {
-        btn.releasePointerCapture(e.pointerId);
+        if (start && start.id === e.pointerId)
+            postMessage({type:'resize_delta',dx:Math.round(e.screenX-start.x),dy:Math.round(e.screenY-start.y)});
+        end(e);
     });
+    btn.addEventListener('pointercancel', end);
+    btn.addEventListener('lostpointercapture', end);
 })();
 ";
 
     readonly PetBridge bridge;
     readonly PetWindow window;
     const int MinSize = 150;
-    Rectangle? startBounds;
+    Rectangle startBounds;
+    bool hasStart;
 
     public ResizeModule(PetBridge bridge, PetWindow window)
     {
@@ -67,16 +75,16 @@ public class ResizeModule : IPetModule, IDisposable
         switch (type)
         {
             case "resize_start":
-                startBounds = window.Window.GetBoundsAsync().Result;
+                startBounds = window.Bounds;
+                hasStart = true;
                 break;
             case "resize_delta":
-                if (startBounds != null)
+                if (hasStart)
                 {
-                    startBounds.Width += data.GetProperty("dx").GetInt32();
-                    startBounds.Height += data.GetProperty("dy").GetInt32();
-                    startBounds.Width = Math.Max(startBounds.Width, MinSize);
-                    startBounds.Height = Math.Max(startBounds.Height, MinSize);
-                    window.Window.SetBounds(startBounds);
+                    Rectangle b = startBounds;
+                    b.Width = Math.Max(startBounds.Width + data.GetProperty("dx").GetInt32(), MinSize);
+                    b.Height = Math.Max(startBounds.Height + data.GetProperty("dy").GetInt32(), MinSize);
+                    _ = window.SetBoundsAsync(b);
                 }
                 break;
         }

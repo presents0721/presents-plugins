@@ -10,12 +10,12 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Drawing;
+using Alife.Client;
 using Alife.Foundation;
 using Alife.Framework;
 using Alife.Function.FunctionCaller;
 using Alife.Function.Speech;
-using ElectronNET.API;
-using ElectronNET.API.Entities;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -52,6 +52,7 @@ public partial class EmotionLive2DPet(
     StorageSystem storageSystem,
     XmlFunctionCaller functionCaller,
     Interactor<EmotionLive2DPet> interactor,
+    IAlifeApplication alifeApplication,
     ILogger<EmotionLive2DPet> logger,
     ISpeechService? speechService = null) :
     ChatBehaviour,
@@ -148,7 +149,6 @@ public partial class EmotionLive2DPet(
     protected override async Task OnAwake()
     {
         memoryKey = $"{Character.StorageKey}/EmotionLive2DPet/Emotion";
-        ChatBot.ChatFinished += OnChatFinished;
 
         await TryWarmupModelsAsync(TimeSpan.FromSeconds(12));
         string modelName = Configuration.ModelName?.Trim() ?? "";
@@ -182,10 +182,11 @@ public partial class EmotionLive2DPet(
                     logger.LogInformation($"[桌宠前端/{level}] {text}");
             };
 
-            string wwwRoot = Path.Combine(
-                pluginSystem.PluginContext.GetPluginDirectoryPath("presents.EmotionLive2DPet"),
-                "Resources", "Live2DDeskPet");
-            await window.CreateAsync(wwwRoot, bridge);
+            string pluginDir = pluginSystem.PluginContext.GetPluginDirectoryPath("presents.EmotionLive2DPet");
+            string? wwwRoot = ResolveWebRoot(pluginDir);
+            if (wwwRoot == null)
+                throw new DirectoryNotFoundException($"找不到桌宠网页资源 Resources/Live2DDeskPet/index.html（插件目录：{pluginDir}）");
+            await window.CreateAsync(wwwRoot);
 
             await LoadModelAsync();
             await LoadModuleAsync(moduleTypes);
@@ -207,10 +208,16 @@ public partial class EmotionLive2DPet(
             RegisterHandler();
 
             RestoreEmotion();
+
+            // 订阅放在最后：初始化中途（窗口加载、模块解析）发生对话结束时，
+            // embodiment / subtitleModule 还是 null，之前的 OnChatFinished 会直接空引用。
+            ChatBot.ChatFinished += OnChatFinished;
+
             logger.LogInformation("Live2D 具身桌宠已启动：{Model}（{Summary}）", metadata.ModelName, DescribeModelSummary());
         }
         catch
         {
+            ChatBot.ChatFinished -= OnChatFinished;
             await provider.DisposeAsync();
             provider = null!;
             throw;
@@ -572,29 +579,38 @@ public partial class EmotionLive2DPet(
     /// <summary>打开系统文件夹选择框（设置页「浏览模型文件夹…」）。</summary>
     public async Task<string[]?> PickFolderAsync(string title)
     {
-        return await PickFolderAsync(title, window?.Window);
+        string? folder = await alifeApplication.SelectFolderAsync();
+        return string.IsNullOrEmpty(folder) ? null : new[] { folder };
     }
 
     /// <summary>
-    /// 不依赖桌宠窗口的选择框（设置页在没有运行中窗口时也能弹出来）。
-    /// 没有桌宠窗口就借用主窗口；连主窗口都拿不到才返回 null，由调用方提示手动填路径。
+    /// 定位桌宠网页资源目录（含 index.html 的 Live2DDeskPet 目录）。
+    /// 市场安装包可能多套了一层同名目录，导致插件根目录下的 Resources 不存在，
+    /// 这里按「直接路径 → 递归查找」的顺序兜底，找不到返回 null。
     /// </summary>
-    public static async Task<string[]?> PickFolderAsync(string title, BrowserWindow? owner)
+    public static string? ResolveWebRoot(string? pluginDir)
     {
-        OpenDialogOptions options = new() {
-            Title = title,
-            Properties = new[] { OpenDialogProperty.openDirectory }
-        };
+        if (string.IsNullOrWhiteSpace(pluginDir) || Directory.Exists(pluginDir) == false) return null;
 
-        BrowserWindow? dialogOwner = owner;
-        if (dialogOwner == null)
+        string direct = Path.Combine(pluginDir, "Resources", "Live2DDeskPet");
+        if (File.Exists(Path.Combine(direct, "index.html"))) return direct;
+
+        try
         {
-            try { dialogOwner = Electron.WindowManager.BrowserWindows.FirstOrDefault(); }
-            catch { }
+            foreach (string dir in Directory.EnumerateDirectories(pluginDir, "Live2DDeskPet", SearchOption.AllDirectories))
+            {
+                if (File.Exists(Path.Combine(dir, "index.html")))
+                {
+                    AlifeLog.LogWarning($"桌宠资源不在预期位置，已回退到：{dir}");
+                    return dir;
+                }
+            }
         }
-        if (dialogOwner == null) return null;
-
-        return await Electron.Dialog.ShowOpenDialogAsync(dialogOwner, options);
+        catch (Exception e)
+        {
+            AlifeLog.LogWarning("递归查找桌宠资源目录失败：" + e.Message);
+        }
+        return null;
     }
 
     /// <summary>在资源管理器中打开目录（目录不存在时先创建）。</summary>
@@ -688,6 +704,7 @@ public partial class EmotionLive2DPet(
         services.AddSingleton(modelContext);
         services.AddSingleton(configContext);
         services.AddSingleton(storageSystem);
+        services.AddSingleton(alifeApplication);
         services.AddSingleton(new PetStorageKey(Character.StorageKey));
         services.AddSingleton<PetWindow>();
         services.AddSingleton<PetBridge>();
@@ -910,14 +927,14 @@ public partial class EmotionLive2DPet(
             bounds.X = (int)Math.Round(startX + (endX - startX) * ease);
             bounds.Y = (int)Math.Round(startY + (endY - startY) * ease);
 
-            window.Window.SetBounds(bounds);
+            await window.SetBoundsAsync(bounds);
             if (t >= 1.0) break;
             await Task.Delay(16);
         }
     }
 
     /// <summary>将桌宠窗口恢复到默认位置与大小（用于桌宠意外跑出屏幕后重置）。</summary>
-    public void ResetWindow() => window.ResetBounds();
+    public void ResetWindow() => _ = window.ResetBoundsAsync();
 
     // ---- 区域坐标 ⇄ 当前窗口真实坐标 换算（供配置 UI 所见即所得）----
 
