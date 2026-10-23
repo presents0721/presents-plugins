@@ -73,10 +73,35 @@ public partial class EmotionLive2DPet(
         try
         {
             await AlifeUtility.DownloadZipFileAsync(ModelsZipUrl, ModelRoot);
+            AlifeLog.LogInformation("已下载默认 Live2D 桌宠模型到 " + ModelRoot);
         }
         catch (Exception ex)
         {
             AlifeLog.LogWarning("下载默认 Live2D 桌宠模型失败\n" + ex);
+        }
+    }
+
+    /// <summary>
+    /// 启动期等待下载示例模型，但**必须有上限**：网络不通时不能把整个插件启动流程挂住，
+    /// 否则客户端会一直停在「加载本地插件」。超时后下载继续在后台跑，下次启动就能用上。
+    /// </summary>
+    static async Task TryWarmupModelsAsync(TimeSpan timeout)
+    {
+        if (Directory.Exists(ModelRoot) && Directory.GetDirectories(ModelRoot).Length > 0)
+            return;
+
+        Task download = EnsureDefaultModelsAsync();
+        try
+        {
+            await download.WaitAsync(timeout);
+        }
+        catch (TimeoutException)
+        {
+            AlifeLog.LogWarning($"下载示例模型超过 {timeout.TotalSeconds:0} 秒，先继续启动插件（后台会接着下载）");
+        }
+        catch (Exception ex)
+        {
+            AlifeLog.LogWarning("准备示例模型时出错：" + ex.Message);
         }
     }
 
@@ -125,7 +150,7 @@ public partial class EmotionLive2DPet(
         memoryKey = $"{Character.StorageKey}/EmotionLive2DPet/Emotion";
         ChatBot.ChatFinished += OnChatFinished;
 
-        await EnsureDefaultModelsAsync();
+        await TryWarmupModelsAsync(TimeSpan.FromSeconds(12));
         string modelName = Configuration.ModelName?.Trim() ?? "";
         if (string.IsNullOrWhiteSpace(modelName))
         {
@@ -363,7 +388,13 @@ public partial class EmotionLive2DPet(
     public string CurrentModel => metadata?.DisplayName ?? Configuration.ModelName;
 
     /// <summary>递归枚举所有可用模型：默认模型目录 + 额外目录里的 *.model3.json。</summary>
-    public List<PetModelEntry> EnumerateModels()
+    public List<PetModelEntry> EnumerateModels() => ScanModels(Configuration.ExtraModelPaths);
+
+    /// <summary>
+    /// 只依赖配置的静态扫描：设置页在插件尚未启动（模块实例不可用）时也能列出模型，
+    /// 避免「刷新列表」这类按钮点了完全没反应。
+    /// </summary>
+    public static List<PetModelEntry> ScanModels(string? extraPaths)
     {
         List<PetModelEntry> result = new();
         HashSet<string> seenDirectories = new(StringComparer.OrdinalIgnoreCase);
@@ -407,14 +438,14 @@ public partial class EmotionLive2DPet(
         }
 
         AddFromRoot(ModelRoot, true);
-        foreach (string extra in (Configuration.ExtraModelPaths ?? "")
+        foreach (string extra in (extraPaths ?? "")
             .Split(new[] { ';', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(path => path.Trim())
             .Where(path => path.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase))
         {
             try { AddFromRoot(extra, false); }
-            catch (Exception e) { logger.LogDebug(e, "扫描模型目录失败：{Path}", extra); }
+            catch (Exception e) { AlifeLog.LogWarning("扫描模型目录失败：" + extra + "\n" + e.Message); }
         }
 
         result.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
@@ -541,30 +572,46 @@ public partial class EmotionLive2DPet(
     /// <summary>打开系统文件夹选择框（设置页「浏览模型文件夹…」）。</summary>
     public async Task<string[]?> PickFolderAsync(string title)
     {
-        try
-        {
-            OpenDialogOptions options = new() {
-                Title = title,
-                Properties = new[] { OpenDialogProperty.openDirectory }
-            };
-            BrowserWindow? owner = window?.Window;
-            if (owner == null) return null;
-            return await Electron.Dialog.ShowOpenDialogAsync(owner, options);
-        }
-        catch (Exception e)
-        {
-            logger.LogWarning(e, "打开文件夹选择框失败");
-            return null;
-        }
+        return await PickFolderAsync(title, window?.Window);
     }
 
-    /// <summary>在资源管理器中打开目录。</summary>
-    public void OpenFolder(string? directory)
+    /// <summary>
+    /// 不依赖桌宠窗口的选择框（设置页在没有运行中窗口时也能弹出来）。
+    /// 没有桌宠窗口就借用主窗口；连主窗口都拿不到才返回 null，由调用方提示手动填路径。
+    /// </summary>
+    public static async Task<string[]?> PickFolderAsync(string title, BrowserWindow? owner)
+    {
+        OpenDialogOptions options = new() {
+            Title = title,
+            Properties = new[] { OpenDialogProperty.openDirectory }
+        };
+
+        BrowserWindow? dialogOwner = owner;
+        if (dialogOwner == null)
+        {
+            try { dialogOwner = Electron.WindowManager.BrowserWindows.FirstOrDefault(); }
+            catch { }
+        }
+        if (dialogOwner == null) return null;
+
+        return await Electron.Dialog.ShowOpenDialogAsync(dialogOwner, options);
+    }
+
+    /// <summary>在资源管理器中打开目录（目录不存在时先创建）。</summary>
+    public bool OpenFolder(string? directory) => OpenFolderPath(directory);
+
+    /// <summary>不依赖模块实例的打开目录，供设置页直接调用。</summary>
+    public static bool OpenFolderPath(string? directory)
     {
         string target = string.IsNullOrWhiteSpace(directory) ? ModelRoot : directory;
-        if (Directory.Exists(target) == false) return;
-        try { System.Diagnostics.Process.Start(new ProcessStartInfo("explorer.exe", $"\"{target}\"") { UseShellExecute = true }); }
-        catch (Exception e) { logger.LogDebug(e, "打开模型目录失败"); }
+        try { Directory.CreateDirectory(target); } catch { }
+        if (Directory.Exists(target) == false) return false;
+        try
+        {
+            System.Diagnostics.Process.Start(new ProcessStartInfo("explorer.exe", $"\"{target}\"") { UseShellExecute = true });
+            return true;
+        }
+        catch { return false; }
     }
 
     /// <summary>
@@ -679,6 +726,13 @@ public partial class EmotionLive2DPet(
     async Task<bool> LoadModelAsync()
     {
         if (provider == null || metadata == null) return false;
+        //没有模型时不要构造空 Uri：那会抛异常把整个模块启动流程打断，桌宠窗口也就永远不出现
+        if (string.IsNullOrWhiteSpace(metadata.ModelPath) || File.Exists(metadata.ModelPath) == false)
+        {
+            logger.LogWarning("没有可加载的 Live2D 模型（{Model}），请把模型放进 {Root}",
+                metadata.ModelName, ModelRoot);
+            return false;
+        }
         PetBridge petBridge = provider.GetRequiredService<PetBridge>();
 
         TaskCompletionSource<bool> loadedTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);

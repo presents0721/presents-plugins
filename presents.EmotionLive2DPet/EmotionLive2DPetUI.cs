@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
@@ -67,15 +68,25 @@ public sealed class EmotionLive2DPetUI : ModuleUIBase<EmotionLive2DPet, EmotionL
 
     void RefreshModels()
     {
-        if (Module == null) return;
-        try { models = Module.EnumerateModels(); }
-        catch (Exception e) { models = new List<PetModelEntry>(); message = "扫描模型失败：" + e.Message; }
+        //扫描不依赖模块实例：插件还没跑起来（或没配置模型）时，这里也必须能列出模型并给出反馈
+        try
+        {
+            models = EmotionLive2DPet.ScanModels(Configuration?.ExtraModelPaths);
+            message = models.Count == 0
+                ? $"没有找到模型。默认目录：{EmotionLive2DPet.ModelRoot}"
+                : $"找到 {models.Count} 个模型，点一下即可切换";
+        }
+        catch (Exception e)
+        {
+            models = new List<PetModelEntry>();
+            message = "扫描模型失败：" + e.Message;
+        }
         modelsLoaded = true;
     }
 
     void EnsureModels()
     {
-        if (modelsLoaded || Module == null) return;
+        if (modelsLoaded || Configuration == null) return;
         RefreshModels();
     }
 
@@ -107,33 +118,68 @@ public sealed class EmotionLive2DPetUI : ModuleUIBase<EmotionLive2DPet, EmotionL
 
         switching = true;
         message = $"正在加载模型「{entry.Name}」…";
-        // 统一回到渲染上下文再刷新，避免在非 UI 线程直接 StateHasChanged 抛异常后 switching 永远卡在 true
-        await InvokeAsync(StateHasChanged);
-
-        bool ok = false;
-        try { ok = Module != null && await Module.SwitchModelAsync(entry.Identifier); }
-        catch (Exception e) { message = "切换模型失败：" + e.Message; }
-
-        switching = false;
-        if (ok)
+        try
         {
-            Configuration.ModelName = entry.Identifier;
-            Sync();
-            message = $"已切换到「{entry.Name}」";
-        }
-        else if (string.IsNullOrEmpty(message) || message.StartsWith("正在", StringComparison.Ordinal))
-        {
-            message = $"模型「{entry.Name}」加载失败，已保留原模型";
-        }
+            await InvokeAsync(StateHasChanged);
 
-        await InvokeAsync(StateHasChanged);
+            bool ok;
+            if (Module == null)
+            {
+                //模块还没启动：先记下选择，应用配置后由插件启动时加载
+                Configuration.ModelName = entry.Identifier;
+                ok = true;
+                message = $"已选择「{entry.Name}」，点底部「应用到全局 / 应用到角色」后生效";
+            }
+            else
+            {
+                ok = await Module.SwitchModelAsync(entry.Identifier);
+                if (ok)
+                {
+                    Configuration.ModelName = entry.Identifier;
+                    Sync();
+                    message = $"已切换到「{entry.Name}」";
+                }
+                else if (string.IsNullOrEmpty(message) || message.StartsWith("正在", StringComparison.Ordinal))
+                {
+                    message = $"模型「{entry.Name}」加载失败，已保留原模型";
+                }
+            }
+            if (ok == false && message.StartsWith("正在", StringComparison.Ordinal))
+                message = $"模型「{entry.Name}」加载失败";
+        }
+        catch (Exception e)
+        {
+            message = "切换模型失败：" + e.Message;
+        }
+        finally
+        {
+            switching = false;
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     async Task BrowseModelsAsync()
     {
-        if (Module == null) return;
-        string[]? picked = await Module.PickFolderAsync("选择模型文件夹（会递归扫描其中的 *.model3.json）");
-        if (picked == null || picked.Length == 0) return;
+        string[]? picked = null;
+        try
+        {
+            picked = Module != null
+                ? await Module.PickFolderAsync("选择模型文件夹（会递归扫描其中的 *.model3.json）")
+                : await EmotionLive2DPet.PickFolderAsync("选择模型文件夹（会递归扫描其中的 *.model3.json）", null);
+        }
+        catch (Exception e)
+        {
+            message = "打开文件夹选择框失败：" + e.Message + "；也可以把路径粘贴到下面「额外模型目录」";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+
+        if (picked == null || picked.Length == 0)
+        {
+            message = "没有选择目录（若弹窗没有出现，把路径粘贴到下面「额外模型目录」后回车）";
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
 
         Configuration.ExtraModelPaths = AppendPath(Configuration.ExtraModelPaths, picked[0]);
         Sync();
@@ -141,6 +187,22 @@ public sealed class EmotionLive2DPetUI : ModuleUIBase<EmotionLive2DPet, EmotionL
         message = models.Count == 0
             ? "该目录及子目录内没有找到 *.model3.json"
             : $"已添加模型目录：{picked[0]}，在上面的列表里点选即可切换";
+        await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>没有模型时一键拉取官方示例模型（与官方桌宠共用缓存）。</summary>
+    async Task DownloadSamplesAsync()
+    {
+        message = "正在下载官方示例模型…";
+        await InvokeAsync(StateHasChanged);
+        try { await EmotionLive2DPet.EnsureDefaultModelsAsync(); }
+        catch (Exception e) { message = "下载失败：" + e.Message; }
+
+        RefreshModels();
+        if (models.Count > 0)
+            message = $"已就绪：找到 {models.Count} 个模型，点一下即可切换";
+        else if (message.StartsWith("下载失败", StringComparison.Ordinal) == false)
+            message = "下载没有成功（可能网络不可用）。请手动把模型文件夹放进默认目录，或用「浏览模型文件夹…」指定任意目录";
         await InvokeAsync(StateHasChanged);
     }
 
@@ -158,12 +220,19 @@ public sealed class EmotionLive2DPetUI : ModuleUIBase<EmotionLive2DPet, EmotionL
 
     void OpenCurrentModelFolder()
     {
-        Module?.OpenFolder(Module.CurrentModelDirectory);
+        string? dir = null;
+        try { dir = Module?.CurrentModelDirectory; } catch { }
+        if (string.IsNullOrWhiteSpace(dir) || Directory.Exists(dir) == false)
+            dir = EmotionLive2DPet.ModelRoot;
+
+        bool ok = EmotionLive2DPet.OpenFolderPath(dir);
+        message = ok ? "已在资源管理器中打开：" + dir : "无法打开目录：" + dir;
     }
 
     void OpenModelsFolder()
     {
-        Module?.OpenFolder(EmotionLive2DPet.ModelRoot);
+        bool ok = EmotionLive2DPet.OpenFolderPath(EmotionLive2DPet.ModelRoot);
+        message = ok ? "已在资源管理器中打开默认模型目录" : "无法打开默认模型目录";
     }
 
     // ---------------- 渲染 ----------------
@@ -205,7 +274,7 @@ public sealed class EmotionLive2DPetUI : ModuleUIBase<EmotionLive2DPet, EmotionL
         b.CloseElement();
         b.OpenElement(s++, "div");
         b.AddAttribute(s++, "class", "el2d-actions");
-        Button(b, ref s, "刷新列表", false, () => { RefreshModels(); message = ""; });
+        Button(b, ref s, "刷新列表", false, RefreshModels);
         Button(b, ref s, "浏览模型文件夹…", true, () => { _ = BrowseModelsAsync(); });
         Button(b, ref s, "打开模型目录", false, OpenCurrentModelFolder);
         b.CloseElement();
@@ -274,6 +343,15 @@ public sealed class EmotionLive2DPetUI : ModuleUIBase<EmotionLive2DPet, EmotionL
                 ? "还没有找到模型。把模型文件夹放进默认目录，或点右上角「浏览模型文件夹…」指向任意目录。"
                 : "没有匹配的模型，换个关键词试试。");
             b.CloseElement();
+
+            if (models.Count == 0)
+            {
+                b.OpenElement(s++, "div");
+                b.AddAttribute(s++, "class", "el2d-actions");
+                b.AddAttribute(s++, "style", "margin-bottom:10px");
+                Button(b, ref s, "下载示例模型", true, () => { _ = DownloadSamplesAsync(); });
+                b.CloseElement();
+            }
         }
 
         b.OpenElement(s++, "div");
