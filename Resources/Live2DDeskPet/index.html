@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Pet Renderer</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <script>
+        // 最早执行的引导脚本：任何后续脚本（pixi / live2d / pet.js）挂掉，主进程都能立刻知道原因，
+        // 不会因为收不到 init 而干等 30 秒再抛 TaskCanceledException 这种看不出问题的异常。
+        (function () {
+            var ipc = null;
+            try {
+                var search = new URLSearchParams(location.search);
+                var hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+                window.__petChannel = search.get('petChannel') || hash.get('petChannel') || 'pet';
+                ipc = require('electron').ipcRenderer;
+                window.__petIpc = ipc;
+            } catch (e) { }
+
+            window.__petRawSend = function (data) {
+                try { if (ipc) ipc.send(window.__petChannel, JSON.stringify(data)); } catch (e) { }
+            };
+
+            // 先报「页面已经起来了」，主进程据此区分「页面没加载」和「页面加载了但脚本报错」
+            window.__petRawSend({ type: 'boot' });
+
+            window.addEventListener('error', function (ev) {
+                var text = '[引导] ' + (ev && ev.message ? ev.message : '脚本错误');
+                if (ev && ev.filename) text += ' @' + ev.filename + ':' + (ev.lineno || 0);
+                window.__petRawSend({ type: 'log', level: 'error', text: text });
+            });
+            window.addEventListener('unhandledrejection', function (ev) {
+                var r = ev && ev.reason;
+                window.__petRawSend({ type: 'log', level: 'unhandledrejection', text: '[引导] ' + (r && (r.stack || r.message) || r) });
+            });
+
+            if (!ipc) {
+                console.error('[引导] require("electron") 不可用：窗口没有开启 Node 集成，桌宠无法与主进程通讯');
+            }
+        })();
+    </script>
+    <canvas id="canvas" data-drag></canvas>
+    <script src="lib/pixi.min.js"></script>
+    <script src="lib/live2d.min.js"></script>
+    <script src="lib/live2dcubismcore.min.js"></script>
+    <script src="lib/pixi-live2d-display.min.js"></script>
+    <script src="pet.js"></script>
+    <script src="lib/soullink/soullink.js"></script>
+    <script src="profile.js"></script>
+    <script src="embodiment.js"></script>
+</body>
+</html>
