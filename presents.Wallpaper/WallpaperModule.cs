@@ -1,15 +1,14 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Alife.Foundation;
 using Alife.Framework;
 using Alife.Function.FunctionCaller;
-using ElectronNET.API;
-using ElectronNET.API.Entities;
 using Microsoft.Extensions.Logging;
 
 namespace presents.Wallpaper;
@@ -20,7 +19,8 @@ namespace presents.Wallpaper;
 /// </summary>
 [Module("wallpaper壁纸",
     "把 Wallpaper Engine 的视频 / 网页壁纸作为 Alife 界面背景：自动扫描 Steam 创意工坊与本地项目，支持轮播，并可让 AI 按情绪 / 标签切换壁纸。",
-    defaultCategory: "presents/窗口美化")]
+    defaultCategory: "presents/窗口美化",
+    globalUI: typeof(WallpaperGlobalUI))]
 public sealed class WallpaperModule(
     PluginSystem pluginSystem,
     XmlFunctionCaller functionCaller,
@@ -32,6 +32,10 @@ public sealed class WallpaperModule(
     public WallpaperConfig Configuration { get; set; } = null!;
 
     readonly WallpaperCatalog catalog = new();
+
+    /// <summary>隐藏清单 + 回收站（删除的文件真的搬走，单条还原，不重扫整库）。</summary>
+    readonly WallpaperLibrary library = new();
+
     LocalStaticServer? server;
     AlifeBackground? background;
     XmlHandler? handler;
@@ -45,12 +49,19 @@ public sealed class WallpaperModule(
 
     const string LastWallpaperKey = "presents.Wallpaper/Last";
 
+    /// <summary>
+    /// 当前活跃的模块实例。Alife 5.0 起页面脚本执行器只在主界面渲染后才可用，
+    /// 由 <see cref="WallpaperGlobalUI"/> 挂载时回调 <see cref="OnUiReadyAsync"/>，靠这里找到实例补注入壁纸。
+    /// </summary>
+    internal static WallpaperModule? Active { get; private set; }
+
     protected override Task OnAwake()
     {
         try
         {
             pluginDirectory = pluginSystem.PluginContext.GetPluginDirectoryPath("presents.Wallpaper");
             WallpaperProps.Store.Init(pluginDirectory);
+            library.Init(pluginDirectory);
             catalog.Refresh(Configuration);
             server = new LocalStaticServer(Path.Combine(pluginDirectory, "Resources", "wwwroot"));
             server.ApiHandler = HandleApiAsync;
@@ -79,8 +90,7 @@ public sealed class WallpaperModule(
 
     protected override async Task OnStart()
     {
-        // 无论是否自动启用，都先清掉旧版本留在桌面上的窗口
-        await CleanupLegacyWindowsAsync();
+        Active = this;
 
         if (!Configuration.AutoStart) return;
 
@@ -91,21 +101,23 @@ public sealed class WallpaperModule(
             WallpaperItem? item = null;
 
             if (!string.IsNullOrWhiteSpace(Configuration.DefaultWallpaper))
-                item = catalog.Find(Configuration.DefaultWallpaper);
+                item = FindVisible(Configuration.DefaultWallpaper);
 
             if (item == null && Configuration.RestoreLast)
             {
                 string? lastId = null;
                 try { lastId = storage.GetObject<string>(LastWallpaperKey); } catch { }
-                if (!string.IsNullOrWhiteSpace(lastId)) item = catalog.Find(lastId);
+                // 上次那张如果已经被隐藏 / 删除，就不该再恢复出来
+                if (!string.IsNullOrWhiteSpace(lastId)) item = FindVisible(lastId);
             }
 
             // 只有「没有任何记录」时才优先视频/网页，避免首次启动只显示场景预览图。
             // 注意：DefaultWallpaper / RestoreLast 命中的那张，哪怕 playable=false（场景壁纸）也要原样恢复——
             // 场景壁纸开着实时渲染（LiveScene）时本来就是动的，不能因为它有封面图就把用户选的换掉。
             // 之前这里无条件换成第一张可播放壁纸，导致每次重载都跳回同一张视频，看起来像"选择没被保存"。
-            if (item == null) item = catalog.Items.FirstOrDefault(x => x.IsPlayable);
-            if (item == null && catalog.Count > 0) item = catalog.Items[0];
+            List<WallpaperItem> visible = VisibleItems();
+            if (item == null) item = visible.FirstOrDefault(x => x.IsPlayable);
+            if (item == null && visible.Count > 0) item = visible[0];
 
             if (item != null)
             {
@@ -196,6 +208,38 @@ public sealed class WallpaperModule(
         server = null;
 
         try { File.Delete(Path.Combine(Path.GetTempPath(), "alife-wallpaper.port")); } catch { }
+
+        if (ReferenceEquals(Active, this)) Active = null;
+    }
+
+    /// <summary>
+    /// 主界面（Blazor）挂载完成时由 <see cref="WallpaperGlobalUI"/> 回调。
+    /// 5.0 起页面脚本执行器（<see cref="AlifeBackground.JsRunner"/>）只有在 UI 渲染后才可用，
+    /// 所以这里把当前选中的壁纸补注入一次：首启时页面未就绪、或页面刷新后层丢失，都靠它兜底。
+    /// </summary>
+    internal static async Task OnUiReadyAsync()
+    {
+        WallpaperModule? module = Active;
+        if (module == null) return;
+
+        await module.ReattachAsync();
+    }
+
+    /// <summary>界面就绪后把当前壁纸补注入一次；首启页面未就绪、或页面刷新后层丢失，都靠它兜底。</summary>
+    async Task ReattachAsync()
+    {
+        if (current == null || server == null) return;
+
+        background ??= new AlifeBackground(logger);
+
+        try
+        {
+            await background.ShowAsync(current, Configuration, server.BaseUrl);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning("[WallpaperEngine] 界面就绪后补注入失败：" + ex.Message);
+        }
     }
 
     // ---------------- 运行逻辑 ----------------
@@ -235,7 +279,8 @@ public sealed class WallpaperModule(
     {
         if (catalog.Count == 0) catalog.Refresh(Configuration);
 
-        WallpaperItem? item = catalog.Step(index, delta);
+        // 只在可见列表里走：隐藏的那几张不该被上下张翻出来
+        WallpaperItem? item = StepVisible(delta);
         if (item == null)
         {
             interactor.Poke("壁纸库为空：先在 Wallpaper Engine 订阅壁纸，或在「自定义壁纸目录」里填文件夹；也可以直接把图片 / 视频丢进 图片\\AlifeWallpaper。");
@@ -244,27 +289,6 @@ public sealed class WallpaperModule(
 
         await PlayAsync(item);
         interactor.Poke($"已切换到壁纸：{item.Title}（{item.Type}）。");
-    }
-
-    /// <summary>清理旧版本创建的桌面壁纸窗口（Title=AlifeWallpaperEngine），不再占用桌面。</summary>
-    async Task CleanupLegacyWindowsAsync()
-    {
-        try
-        {
-            foreach (BrowserWindow window in Electron.WindowManager.BrowserWindows.ToList())
-            {
-                string title;
-                try { title = await window.GetTitleAsync(); } catch { continue; }
-                if (!string.Equals(title, "AlifeWallpaperEngine", StringComparison.OrdinalIgnoreCase)) continue;
-
-                logger.LogInformation("[WallpaperEngine] 清理旧版桌面壁纸窗口");
-                try { window.Destroy(); } catch { }
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning("[WallpaperEngine] 清理旧窗口失败：" + ex.Message);
-        }
     }
 
     // ---------------- 挂件 HTTP API ----------------
@@ -372,18 +396,76 @@ public sealed class WallpaperModule(
 
             case "/api/switch":
             {
-                WallpaperItem? item = catalog.Find(args.GetValueOrDefault("id"));
+                WallpaperItem? item = FindVisible(args.GetValueOrDefault("id"));
 
                 // 找不到就重扫一次：常见于刚丢进素材目录、还没到自动重扫时间
                 if (item == null)
                 {
                     catalog.Refresh(Configuration);
-                    item = catalog.Find(args.GetValueOrDefault("id"));
+                    item = FindVisible(args.GetValueOrDefault("id"));
                 }
 
                 if (item == null) return "{\"ok\":false,\"error\":\"没有找到这张壁纸\"}";
 
                 await PlayAsync(item);
+                return BuildStateJson();
+            }
+
+            // 隐藏：只登记，不动文件。创意工坊缓存那种不方便展示的壁纸用这个
+            case "/api/hide":
+            {
+                WallpaperItem? item = catalog.Find(args.GetValueOrDefault("id"));
+                if (item == null) return "{\"ok\":false,\"error\":\"没有找到这张壁纸\"}";
+
+                library.Hide(item);
+                logger.LogInformation("[WallpaperEngine] 已隐藏：{Title}", item.Title);
+                return BuildStateJson();
+            }
+
+            // 取消隐藏（隐藏列表里点「恢复」）
+            case "/api/unhide":
+            {
+                string key = args.GetValueOrDefault("key") ?? args.GetValueOrDefault("id") ?? "";
+                library.Unhide(key);
+                return BuildStateJson();
+            }
+
+            // 删除：搬进回收站。只更新列表，不做重新加载（当前那张保持原样，不会闪一下）
+            case "/api/delete":
+            {
+                WallpaperItem? item = catalog.Find(args.GetValueOrDefault("id"));
+                if (item == null) return "{\"ok\":false,\"error\":\"没有找到这张壁纸\"}";
+
+                (bool ok, string message, WallpaperLibrary.TrashEntry? entry) = library.Delete(item);
+                _ = entry;
+                if (!ok) return JsonSerializer.Serialize(new { ok = false, error = message });
+
+                // 只把这一条从列表里摘掉，不整库重扫、也不重新加载壁纸
+                catalog.Remove(item);
+                logger.LogInformation("[WallpaperEngine] {Title} → {Message}", item.Title, message);
+                return BuildStateJson();
+            }
+
+            // 从回收站还原单条：只搬这一条，不重扫整库，不会把别的已删项一起捞回来
+            case "/api/restore":
+            {
+                string key = args.GetValueOrDefault("key") ?? args.GetValueOrDefault("id") ?? "";
+                (bool ok, string message) = library.Restore(key);
+                if (!ok) return JsonSerializer.Serialize(new { ok = false, error = message });
+
+                catalog.Refresh(Configuration);
+                logger.LogInformation("[WallpaperEngine] 回收站还原：{Message}", message);
+                return BuildStateJson();
+            }
+
+            // 彻底删除：真删回收站里的文件 / 目录
+            case "/api/purge":
+            {
+                string key = args.GetValueOrDefault("key") ?? args.GetValueOrDefault("id") ?? "";
+                (bool ok, string message) = library.Purge(key);
+                if (!ok) return JsonSerializer.Serialize(new { ok = false, error = message });
+
+                logger.LogInformation("[WallpaperEngine] 回收站彻底删除：{Message}", message);
                 return BuildStateJson();
             }
 
@@ -573,6 +655,44 @@ public sealed class WallpaperModule(
         return "{\"ok\":false,\"error\":\"unknown api\"}";
     }
 
+    // ---------------- 隐藏 / 回收站 ----------------
+
+    /// <summary>
+    /// 列表里真正要显示的壁纸：扫描结果里去掉被隐藏的、去掉在回收站里的。
+    /// 回收站也要过滤，是因为「删除失败但已登记」的那几条文件还躺在原位，重扫会把它们捞回来。
+    /// </summary>
+    List<WallpaperItem> VisibleItems()
+        => catalog.Items.Where(x => !library.IsHidden(x) && !library.IsTrashed(WallpaperLibrary.KeyOf(x))).ToList();
+
+    WallpaperItem? FindVisible(string? query)
+    {
+        List<WallpaperItem> visible = VisibleItems();
+        if (visible.Count == 0) return null;
+
+        if (string.IsNullOrWhiteSpace(query))
+            return visible.FirstOrDefault(x => x.IsPlayable) ?? visible[0];
+
+        string q = query.Trim();
+
+        return visible.FirstOrDefault(x => x.Id.Equals(q, StringComparison.OrdinalIgnoreCase))
+            ?? visible.FirstOrDefault(x => x.Title.Equals(q, StringComparison.CurrentCultureIgnoreCase))
+            ?? visible.FirstOrDefault(x => x.Title.Contains(q, StringComparison.CurrentCultureIgnoreCase));
+    }
+
+    /// <summary>上一张 / 下一张：只在可见列表里走，隐藏的会被跳过。</summary>
+    WallpaperItem? StepVisible(int delta)
+    {
+        List<WallpaperItem> visible = VisibleItems();
+        if (visible.Count == 0) return null;
+
+        int at = current == null ? -1 : visible.FindIndex(x => x.Id == current.Id);
+        if (at < 0) return delta >= 0 ? visible[0] : visible[^1];
+
+        int i = (at + delta) % visible.Count;
+        if (i < 0) i += visible.Count;
+        return visible[i];
+    }
+
     /// <param name="applied">上一次属性改动在页面侧的落点（scene / web / no-scene / scripts-off），给挂件提示用。</param>
     /// <param name="scene">实时渲染是否在跑：up / down（down = 页面只有预览图，调属性看不到变化）。</param>
     string BuildStateJson(string applied = "", string scene = "")
@@ -580,7 +700,10 @@ public sealed class WallpaperModule(
         string? currentId = current?.Id;
         string baseUrl = server?.BaseUrl ?? "";
 
-        var items = catalog.Items.Select(x => new
+        // 隐藏的壁纸不进列表；回收站里的那些文件已经搬走了，扫描也扫不到
+        List<WallpaperItem> visible = VisibleItems();
+
+        var items = visible.Select(x => new
         {
             id = x.Id,
             title = x.Title,
@@ -626,9 +749,41 @@ public sealed class WallpaperModule(
                         string.Equals(current.Type, "web", StringComparison.OrdinalIgnoreCase)))
                 ? WallpaperProps.ForPanel(WallpaperProps.Resolve(current, WallpaperProps.Store.Get(current.Id)))
                 : new List<object>(),
-            count = catalog.Count,
+            // 数量对比：扫描到多少 / 列表里实际有多少（隐藏、排除词、跳过场景都会让两者对不上）
+            count = visible.Count,
+            // 两个标签各自的扫描基数：引擎壁纸 53 张里的 video 不该算进「我的」计数
+            scanned = catalog.ScannedCount,
+            scannedMedia = catalog.ScannedMediaCount,
+            scannedEngine = catalog.ScannedEngineCount,
             // 「我的」标签用：数量、已添加的目录、推荐投放目录
-            mediaCount = catalog.Items.Count(x => x.IsUserMedia),
+            mediaCount = visible.Count(x => x.IsUserMedia),
+            engineCount = visible.Count(x => !x.IsUserMedia),
+            // 图片 / 视频只统计自己的素材，引擎壁纸的 video 类型不算
+            videoCount = visible.Count(x => x.IsUserMedia && string.Equals(x.Type, "video", StringComparison.OrdinalIgnoreCase)),
+            imageCount = visible.Count(x => x.IsUserMedia && string.Equals(x.Type, "image", StringComparison.OrdinalIgnoreCase)),
+            sceneCount = visible.Count(x => string.Equals(x.Type, "scene", StringComparison.OrdinalIgnoreCase)),
+            hiddenCount = library.HiddenCount,
+            trashCount = library.TrashCount,
+            hidden = library.Hidden.Select(x => new
+            {
+                key = x.Key,
+                id = x.Id,
+                title = x.Title,
+                type = x.Type,
+                src = x.Source,
+                at = x.At
+            }).ToList(),
+            trash = library.Trash.Select(x => new
+            {
+                key = x.Key,
+                id = x.Id,
+                title = x.Title,
+                type = x.Type,
+                src = x.Source,
+                at = x.At,
+                // false = 当时文件被占用没能搬走，只做了登记
+                moved = !string.IsNullOrEmpty(x.Stored)
+            }).ToList(),
             mediaDirs = MediaDirectoryList(),
             dropDir = DefaultDropDirectory(),
             items
@@ -637,20 +792,16 @@ public sealed class WallpaperModule(
 
     // ---------------- 自定义素材目录 ----------------
 
+    /// <summary>
+    /// 弹系统目录选择框。Alife 5.0 是 WinForms 客户端，直接用 FolderBrowserDialog。
+    /// 插件代码跑在后台线程上，而对话框要求 STA 线程并自建消息循环，
+    /// 所以这里起一个临时 STA 线程来弹（Form.ShowDialog 自己会泵消息）。
+    /// </summary>
     async Task<string?> PickMediaDirectoryAsync()
     {
         try
         {
-            var parent = Electron.WindowManager.BrowserWindows.FirstOrDefault();
-
-            string[]? picked = await Electron.Dialog.ShowOpenDialogAsync(parent, new OpenDialogOptions
-            {
-                Title = "选择要递归扫描的壁纸文件夹",
-                ButtonLabel = "添加",
-                Properties = new[] { OpenDialogProperty.openDirectory },
-            });
-
-            return picked?.FirstOrDefault();
+            return await ShowFolderDialogAsync();
         }
         catch (Exception ex)
         {
@@ -659,6 +810,39 @@ public sealed class WallpaperModule(
             interactor.Poke("打开文件夹选择器失败：" + ex.Message + "（也可以在模块设置里手填「自定义壁纸目录」）");
             return null;
         }
+    }
+
+    /// <summary>在独立的 STA 线程上弹 FolderBrowserDialog，返回选中的路径（取消则 null）。</summary>
+    static Task<string?> ShowFolderDialogAsync()
+    {
+        TaskCompletionSource<string?> completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        Thread thread = new(() =>
+        {
+            try
+            {
+                using System.Windows.Forms.FolderBrowserDialog dialog = new()
+                {
+                    Description = "选择壁纸目录（图片 / 视频 / Wallpaper Engine 项目）",
+                    UseDescriptionForTitle = true,
+                    ShowNewFolderButton = true
+                };
+
+                completion.SetResult(
+                    dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK ? dialog.SelectedPath : null);
+            }
+            catch (Exception ex)
+            {
+                completion.SetException(ex);
+            }
+        });
+
+        thread.IsBackground = true;
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+
+        return completion.Task;
     }
 
     List<string> MediaDirectoryList()
@@ -762,12 +946,12 @@ public sealed class WallpaperModule(
     {
         if (catalog.Count == 0) catalog.Refresh(Configuration);
 
-        WallpaperItem? item = catalog.Find(query);
+        WallpaperItem? item = FindVisible(query);
         if (item == null)
         {
             interactor.Poke(catalog.Count == 0
                 ? "壁纸库为空：先在 Wallpaper Engine 订阅壁纸，或在「自定义壁纸目录」里填文件夹；也可以直接把图片 / 视频丢进 图片\\AlifeWallpaper。"
-                : $"没有找到匹配「{query}」的壁纸。可用壁纸：" + string.Join("、", catalog.Items.Take(10).Select(x => x.Title)));
+                : $"没有找到匹配「{query}」的壁纸。可用壁纸：" + string.Join("、", VisibleItems().Take(10).Select(x => x.Title)));
             return;
         }
 
@@ -788,7 +972,12 @@ public sealed class WallpaperModule(
     {
         if (catalog.Count == 0) catalog.Refresh(Configuration);
 
-        WallpaperItem? item = catalog.FindByTag(tag);
+        // 隐藏的壁纸不参与标签挑选：用户主动藏起来的就是不想让它再被翻出来
+        List<WallpaperItem> visible = VisibleItems();
+        WallpaperItem? item = visible.FirstOrDefault(x =>
+                                x.Tags.Any(t => t.Contains(tag, StringComparison.CurrentCultureIgnoreCase)))
+                            ?? visible.FirstOrDefault(x => x.Title.Contains(tag, StringComparison.CurrentCultureIgnoreCase));
+
         if (item == null)
         {
             interactor.Poke(catalog.Count == 0
@@ -830,12 +1019,14 @@ public sealed class WallpaperModule(
         }
 
         limit = Math.Clamp(limit, 1, 100);
-        string lines = string.Join("\n", catalog.Items.Take(limit)
+
+        List<WallpaperItem> visible = VisibleItems();
+        string lines = string.Join("\n", visible.Take(limit)
             .Select((x, i) => $"{i + 1}. {x.Title} [{x.Type}] {x.Id}" +
                               (x.Tags.Count > 0 ? " #" + string.Join(" #", x.Tags.Take(4)) : "")));
 
-        interactor.Poke($"壁纸库共 {catalog.Count} 张：\n{lines}" +
-                        (catalog.Count > limit ? $"\n…（仅显示前 {limit} 张）" : ""));
+        interactor.Poke($"壁纸库共 {visible.Count} 张：\n{lines}" +
+                        (visible.Count > limit ? $"\n…（仅显示前 {limit} 张）" : ""));
         return Task.CompletedTask;
     }
 
