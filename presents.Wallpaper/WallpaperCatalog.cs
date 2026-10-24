@@ -24,8 +24,27 @@ internal sealed class WallpaperCatalog
     public int Count => items.Count;
     public IReadOnlyList<WallpaperItem> Items => items;
 
+    /// <summary>
+    /// 过滤（跳过场景 / 排除关键词）之前扫到的原始数量。
+    /// 挂件拿它和列表的实际条数做对比，数量对不上时用户一眼能看出是被过滤掉了而不是没扫到。
+    /// </summary>
+    public int ScannedCount { get; private set; }
+
+    /// <summary>扫描到但还没过滤时，自己的素材 / 引擎壁纸各有多少。</summary>
+    public int ScannedMediaCount { get; private set; }
+
+    /// <summary>扫描到但还没过滤时，引擎壁纸（创意工坊 / 项目 / 额外目录）有多少。</summary>
+    public int ScannedEngineCount { get; private set; }
+
     /// <summary>最近一次扫描的可读摘要，便于排查“为什么是 0 张”。</summary>
     public string LastSummary { get; private set; } = "";
+
+    /// <summary>
+    /// 从列表里精确摘掉一条（删除到回收站后用）。
+    /// 不走整库重扫：大库重扫要几秒，而且容易把之前删掉的又扫回来。
+    /// </summary>
+    public bool Remove(WallpaperItem item)
+        => items.RemoveAll(x => string.Equals(x.Id, item.Id, StringComparison.OrdinalIgnoreCase)) > 0;
 
     /// <summary>上次扫描时间：挂件轮询时用它决定要不要重扫（用户刚丢进去的图要能自己出来）。</summary>
     public DateTime LastScanUtc { get; private set; } = DateTime.MinValue;
@@ -52,6 +71,12 @@ internal sealed class WallpaperCatalog
         ScanMedia(config, found);
 
         string[] excludes = SplitKeywords(config.ExcludeKeywords);
+
+        ScannedCount = found.Count;
+
+        // 「我的」标签要拿自己的扫描基数做对比，不能跟引擎壁纸混在一起算
+        ScannedMediaCount = found.Values.Count(x => x.IsUserMedia);
+        ScannedEngineCount = ScannedCount - ScannedMediaCount;
 
         items.Clear();
         foreach (WallpaperItem item in found.Values.OrderBy(x => x.Title, StringComparer.CurrentCultureIgnoreCase))
