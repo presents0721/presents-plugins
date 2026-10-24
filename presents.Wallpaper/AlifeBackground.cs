@@ -4,14 +4,13 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
-using ElectronNET.API;
 using Microsoft.Extensions.Logging;
 
 namespace presents.Wallpaper;
 
 /// <summary>
-/// 往 Alife 主窗口（Electron + Blazor）里注入一层全屏壁纸。
-/// 主窗口本身就是 Chromium，所以直接用 WebContents.ExecuteJavaScript 操作 DOM：
+/// 往 Alife 主窗口（WebView2 + Blazor）里注入一层全屏壁纸。
+/// 主窗口本身就是 Chromium，由 GlobalUI 组件通过 IJSRuntime 执行脚本操作 DOM：
 ///   #alife-wallpaper  z-index:0，位于 .app-container（z-index:1）之后；
 ///   同时把 .main-content 的背景改为透明，让壁纸透出来。
 /// 不再创建独立窗口，也不碰桌面 WorkerW。
@@ -22,7 +21,7 @@ internal sealed class AlifeBackground
         (function () {
           // 版本守卫：插件重载后页面里还挂着旧脚本，必须让新版覆盖它，
           // 否则一直跑老逻辑（旧版没有挂件、也没有磨砂面板）。
-          var VER = '1.7.2';
+          var VER = '5.7.2';
           if (window.__alifeWpVer === VER && window.__alifeWallpaperShow) return 'ready';
 
           // 换版本时旧挂件的 DOM 和事件还挂在页面上（__alifeWallpaperWidget 见到就早退），
@@ -958,7 +957,7 @@ internal sealed class AlifeBackground
                 '#alife-wp-widget .wp-trigger.pet.failed .wp-pet-img{display:none;}' +
                 '#alife-wp-widget .wp-trigger.pet.failed .wp-pet-fallback{display:block;}' +
                 '#alife-wp-widget .wp-trigger.pet.failed{background:rgba(22,22,28,.86);border:1px solid rgba(255,255,255,.28);box-shadow:0 8px 22px rgba(0,0,0,.45);padding:0 14px 0 11px;height:38px;border-radius:19px;}' +
-                '#alife-wp-widget .wp-panel{position:absolute;right:0;bottom:54px;width:392px;max-width:calc(100vw - 24px);max-height:min(86vh,780px);display:none;flex-direction:column;border-radius:16px;background:rgba(18,18,23,.55);border:1px solid rgba(255,255,255,.12);box-shadow:0 18px 44px rgba(0,0,0,.52);backdrop-filter:blur(9px);color:#e9e9ef;overflow:hidden;}' +
+                '#alife-wp-widget .wp-panel{position:absolute;right:0;bottom:54px;width:436px;max-width:calc(100vw - 24px);max-height:min(86vh,780px);display:none;flex-direction:column;border-radius:16px;background:rgba(18,18,23,.55);border:1px solid rgba(255,255,255,.12);box-shadow:0 18px 44px rgba(0,0,0,.52);backdrop-filter:blur(9px);color:#e9e9ef;overflow:hidden;}' +
                 '#alife-wp-widget.open .wp-panel{display:flex;}' +
                 // 面板调到很透时，文字加深色描边才不会跟壁纸糊在一起
                 '#alife-wp-widget .wp-panel.wp-thin{text-shadow:0 1px 2px rgba(0,0,0,.95),0 0 4px rgba(0,0,0,.85);border-color:rgba(255,255,255,.22);}' +
@@ -1014,12 +1013,33 @@ internal sealed class AlifeBackground
                 '#alife-wp-widget .wp-prop-actions button:hover{background:rgba(255,255,255,.14);}' +
                 '#alife-wp-widget .wp-warn{color:#ffcf9b;background:rgba(255,170,60,.1);border:1px solid rgba(255,170,60,.28);border-radius:8px;padding:5px 7px;margin:3px 2px 6px;line-height:1.5;white-space:normal;}' +
                 '#alife-wp-widget .wp-list{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:6px;display:flex;flex-direction:column;gap:2px;}' +
-                '#alife-wp-widget .wp-item{display:flex;align-items:center;gap:9px;padding:6px;border:0;border-radius:9px;background:transparent;color:#e9e9ef;cursor:pointer;text-align:left;width:100%;}' +
+                // 每一项都是「可点的正文 + 右侧动作按钮」：按钮多了要更高的行，宽度也跟着放大一档
+                '#alife-wp-widget .wp-item{display:flex;align-items:center;gap:6px;padding:8px;border:0;border-radius:10px;background:transparent;color:#e9e9ef;width:100%;min-height:60px;}' +
                 '#alife-wp-widget .wp-item:hover{background:rgba(255,255,255,.08);}' +
                 '#alife-wp-widget .wp-item.current{background:rgba(124,196,255,.16);}' +
-                '#alife-wp-widget .wp-item img,#alife-wp-widget .wp-noimg{width:52px;height:32px;border-radius:6px;object-fit:cover;flex:0 0 auto;background:rgba(255,255,255,.08);}' +
-                '#alife-wp-widget .wp-title{flex:1;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
-                '#alife-wp-widget .wp-type{font-size:10px;color:#8b8b99;font-style:normal;}' +
+                '#alife-wp-widget .wp-pick{flex:1;min-width:0;display:flex;align-items:center;gap:9px;padding:0;border:0;background:transparent;color:inherit;font:inherit;cursor:pointer;text-align:left;}' +
+                '#alife-wp-widget .wp-pick.aside{cursor:default;}' +
+                '#alife-wp-widget .wp-item img,#alife-wp-widget .wp-noimg{width:66px;height:42px;border-radius:7px;object-fit:cover;flex:0 0 auto;background:rgba(255,255,255,.08);}' +
+                '#alife-wp-widget .wp-col{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}' +
+                '#alife-wp-widget .wp-title{flex:1;font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
+                '#alife-wp-widget .wp-type{font-size:10px;color:#8b8b99;font-style:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
+                // 动作按钮：平时半透明，悬停整行才完全亮起来，免得列表花
+                '#alife-wp-widget .wp-acts{display:flex;align-items:center;gap:4px;flex:0 0 auto;opacity:.42;transition:opacity .15s;}' +
+                '#alife-wp-widget .wp-item:hover .wp-acts{opacity:1;}' +
+                '#alife-wp-widget .wp-act{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#cfd3dd;font-size:11px;line-height:1;padding:5px 8px;border-radius:7px;cursor:pointer;white-space:nowrap;}' +
+                '#alife-wp-widget .wp-act:hover{background:rgba(255,255,255,.18);color:#fff;}' +
+                '#alife-wp-widget .wp-act.danger{color:#ffc9c9;border-color:rgba(255,120,120,.35);background:rgba(255,80,80,.12);}' +
+                '#alife-wp-widget .wp-act.danger:hover{background:rgba(255,80,80,.28);}' +
+                '#alife-wp-widget .wp-act.ok{color:#cfe6ff;border-color:rgba(124,196,255,.45);background:rgba(124,196,255,.16);}' +
+                '#alife-wp-widget .wp-act.arm{color:#fff;border-color:rgba(255,90,90,.85);background:rgba(255,60,60,.55);font-weight:600;}' +
+                // 全部 / 隐藏 / 回收站 的过滤条 + 数量对比
+                '#alife-wp-widget .wp-subbar{display:flex;align-items:center;gap:6px;padding:0 2px 7px;flex-wrap:wrap;}' +
+                '#alife-wp-widget .wp-f{border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);color:#b9bcc8;font-size:11px;padding:4px 9px;border-radius:8px;cursor:pointer;white-space:nowrap;}' +
+                '#alife-wp-widget .wp-f:hover{background:rgba(255,255,255,.12);}' +
+                '#alife-wp-widget .wp-f.on{background:rgba(124,196,255,.24);border-color:rgba(124,196,255,.6);color:#e8f4ff;font-weight:600;}' +
+                '#alife-wp-widget .wp-f em{font-style:normal;opacity:.75;margin-left:3px;}' +
+                '#alife-wp-widget .wp-cmp{margin-left:auto;font-size:10px;color:#8b8b99;white-space:nowrap;}' +
+                '#alife-wp-widget .wp-note{font-size:10px;color:#8b8b99;line-height:1.55;padding:0 3px 7px;}' +
                 '#alife-wp-widget .wp-empty{padding:18px;text-align:center;color:#8b8b99;font-size:12px;line-height:1.7;}' +
                 // 「我的」页的工具条与已添加目录
                 '#alife-wp-widget .wp-mine-bar{display:flex;gap:6px;padding:2px 2px 6px;}' +
@@ -1206,6 +1226,8 @@ internal sealed class AlifeBackground
             var propsOpen = false;
             // 「我的」标签：只看自己导入的图片 / 视频，不和引擎壁纸混在一张列表里
             var mineOpen = false;
+            // 列表内的过滤视图：all = 正常列表，hidden = 隐藏清单，trash = 回收站
+            var view = 'all';
             var propsCache = [];
             var lastState = null;      // 最近一次 state，属性页要拿它判断「这次改动到底落到哪了」
 
@@ -1278,6 +1300,15 @@ internal sealed class AlifeBackground
               if (it.playable) return it.type;
               if (it.type === 'scene') return (state && state.liveScene) ? '场景' : '仅预览';
               return '仅预览';
+            }
+
+            // 隐藏 / 回收站里的条目只有类型字符串，没有 state 上下文
+            function wpTypeText(type) {
+              if (type === 'video') return '视频';
+              if (type === 'image') return '图片';
+              if (type === 'web') return '网页';
+              if (type === 'scene') return '场景';
+              return type || '壁纸';
             }
 
             function sendProp(name, value, commit) {
@@ -1482,6 +1513,7 @@ internal sealed class AlifeBackground
                 (state.items[si].src === 'media' ? mineItems : engineItems).push(state.items[si]);
               }
 
+              // 标题上的数字跟着当前标签走：壁纸 = 引擎壁纸数，我的 = 自己的素材数
               if (countEl) countEl.textContent = (mineOpen ? mineItems.length : engineItems.length) + ' 张';
 
               if (tabProps) {
@@ -1499,13 +1531,28 @@ internal sealed class AlifeBackground
               if (propsOpen) { renderProps(); return; }
 
               var shown = mineOpen ? mineItems : engineItems;
+              var hiddenList = state.hidden || [];
+              var trashList = state.trash || [];
               var html = '';
 
-              if (mineOpen) {
+              // 过滤条：全部 / 隐藏 / 回收站；右边是「扫描到多少 · 列表里多少」的对比
+              html += '<div class="wp-subbar">' +
+                        '<button class="wp-f' + (view === 'all' ? ' on' : '') + '" type="button" data-f="all">全部<em>' + shown.length + '</em></button>' +
+                        '<button class="wp-f' + (view === 'hidden' ? ' on' : '') + '" type="button" data-f="hidden">隐藏<em>' + hiddenList.length + '</em></button>' +
+                        '<button class="wp-f' + (view === 'trash' ? ' on' : '') + '" type="button" data-f="trash">回收站<em>' + trashList.length + '</em></button>' +
+                        // 对比只在当前标签内算：壁纸页比引擎壁纸，我的页比自己的素材
+                        '<span class="wp-cmp" title="左 = 这次扫描到的条数（含被排除词 / 跳过场景过滤掉的）；右 = 当前标签里显示的条数">扫描 ' +
+                          (mineOpen ? (state.scannedMedia || 0) : (state.scannedEngine || 0)) + ' · 显示 ' + shown.length +
+                        '</span>' +
+                      '</div>';
+
+              if (view === 'all' && mineOpen) {
                 html += '<div class="wp-mine-bar">' +
                           '<button class="wp-adddir" type="button" title="选一个文件夹，递归扫描里面的图片和视频">＋ 文件夹</button>' +
                           '<button class="wp-rescan" type="button" title="重新扫描；新丢进去的文件也会出来">重扫</button>' +
                           '<button class="wp-reveal" type="button" title="在资源管理器里打开推荐投放目录">打开目录</button>' +
+                          // 我的素材的图片 / 视频数量对比
+                          '<span class="wp-cmp" title="扫描到的素材里，图片和视频各有多少">图片 ' + (state.imageCount || 0) + ' · 视频 ' + (state.videoCount || 0) + '</span>' +
                         '</div>';
 
                 var dirs = state.mediaDirs || [];
@@ -1521,19 +1568,71 @@ internal sealed class AlifeBackground
                 }
               }
 
-              for (var i = 0; i < shown.length; i++) {
-                var it = shown[i];
-                html += '<button class="wp-item' + (it.current ? ' current' : '') + '" type="button" data-id="' + esc(it.id) + '">' +
-                          (it.preview ? '<img src="' + esc(it.preview) + '" loading="lazy" alt="">' : '<span class="wp-noimg"></span>') +
-                          '<span class="wp-title">' + esc(it.title) + '</span>' +
-                          '<em class="wp-type">' + wpTypeLabel(it, state) + '</em>' +
-                        '</button>';
-              }
+              if (view === 'trash') {
+                html += '<div class="wp-note">删除的壁纸已经搬到插件的 Recycle 目录（不会自动重新加载）。' +
+                        '逐项点「还原」会搬回原位置；「彻底删除」才会真的删掉。</div>';
 
-              if (!shown.length) {
-                html += mineOpen
-                  ? '<div class="wp-empty">还没有自己的素材<br><span style="font-size:11px;opacity:.75">点上面「＋ 文件夹」选一个目录，递归扫描其中的图片和视频</span></div>'
-                  : '<div class="wp-empty">壁纸库是空的<br><span style="font-size:11px;opacity:.75">订阅 Wallpaper Engine 壁纸，或到「我的」里添加文件夹</span></div>';
+                for (var ti = 0; ti < trashList.length; ti++) {
+                  var tr = trashList[ti];
+                  html += '<div class="wp-item">' +
+                            '<span class="wp-pick aside" title="' + esc(tr.key) + '">' +
+                              '<span class="wp-noimg"></span>' +
+                              '<span class="wp-col">' +
+                                '<span class="wp-title">' + esc(tr.title || tr.key) + '</span>' +
+                                '<em class="wp-type">' + (tr.moved === false ? '文件未搬移 · ' : '') + esc(tr.at || '') + '</em>' +
+                              '</span>' +
+                            '</span>' +
+                            '<span class="wp-acts">' +
+                              '<button class="wp-act ok wp-restore" type="button" data-key="' + esc(tr.key) + '" title="搬回原位置，只还原这一条">还原</button>' +
+                              '<button class="wp-act danger wp-purge" type="button" data-key="' + esc(tr.key) + '" title="真删文件，不能撤销">彻底删除</button>' +
+                            '</span>' +
+                          '</div>';
+                }
+
+                if (!trashList.length) html += '<div class="wp-empty">回收站是空的</div>';
+              } else if (view === 'hidden') {
+                html += '<div class="wp-note">隐藏只登记、不动文件，Wallpaper Engine 缓存的壁纸也能藏。点「恢复」就回到列表。</div>';
+
+                for (var hi = 0; hi < hiddenList.length; hi++) {
+                  var hn = hiddenList[hi];
+                  html += '<div class="wp-item">' +
+                            '<span class="wp-pick aside" title="' + esc(hn.key) + '">' +
+                              '<span class="wp-noimg"></span>' +
+                              '<span class="wp-col">' +
+                                '<span class="wp-title">' + esc(hn.title || hn.key) + '</span>' +
+                                '<em class="wp-type">' + esc(wpTypeText(hn.type)) + (hn.at ? ' · ' + esc(hn.at) : '') + '</em>' +
+                              '</span>' +
+                            '</span>' +
+                            '<span class="wp-acts">' +
+                              '<button class="wp-act ok wp-unhide" type="button" data-key="' + esc(hn.key) + '" title="取消隐藏，回到列表">恢复</button>' +
+                            '</span>' +
+                          '</div>';
+                }
+
+                if (!hiddenList.length) html += '<div class="wp-empty">没有隐藏的壁纸</div>';
+              } else {
+                for (var i = 0; i < shown.length; i++) {
+                  var it = shown[i];
+                  html += '<div class="wp-item' + (it.current ? ' current' : '') + '">' +
+                            '<button class="wp-pick" type="button" data-id="' + esc(it.id) + '" title="' + esc(it.title) + '">' +
+                              (it.preview ? '<img src="' + esc(it.preview) + '" loading="lazy" alt="">' : '<span class="wp-noimg"></span>') +
+                              '<span class="wp-col">' +
+                                '<span class="wp-title">' + esc(it.title) + '</span>' +
+                                '<em class="wp-type">' + wpTypeLabel(it, state) + '</em>' +
+                              '</span>' +
+                            '</button>' +
+                            '<span class="wp-acts">' +
+                              '<button class="wp-act wp-hide" type="button" data-id="' + esc(it.id) + '" title="隐藏：从列表里收起来，文件不动">隐藏</button>' +
+                              '<button class="wp-act danger wp-del" type="button" data-id="' + esc(it.id) + '" title="删除：搬到回收站，可以还原">删除</button>' +
+                            '</span>' +
+                          '</div>';
+                }
+
+                if (!shown.length) {
+                  html += mineOpen
+                    ? '<div class="wp-empty">还没有自己的素材<br><span style="font-size:11px;opacity:.75">点上面「＋ 文件夹」选一个目录，递归扫描其中的图片和视频</span></div>'
+                    : '<div class="wp-empty">壁纸库是空的<br><span style="font-size:11px;opacity:.75">订阅 Wallpaper Engine 壁纸，或到「我的」里添加文件夹</span></div>';
+                }
               }
 
               list.innerHTML = html;
@@ -1597,9 +1696,93 @@ internal sealed class AlifeBackground
               });
             });
 
+            // 逐项二次确认：第一次点把按钮变成「确认…」，再点一次才真的执行。
+            // 目的就是不让「恢复 / 彻底删除」变成一键批量操作。
+            function wpArm(btn, label, run) {
+              var now = Date.now();
+              var armedAt = parseInt(btn.getAttribute('data-arm-at') || '0', 10);
+
+              if (btn.getAttribute('data-arm') === '1' && now - armedAt < 6000) {
+                btn.removeAttribute('data-arm');
+                btn.textContent = '处理中…';
+                btn.disabled = true;
+                run();
+                return;
+              }
+
+              btn.setAttribute('data-arm', '1');
+              btn.setAttribute('data-arm-at', String(now));
+
+              var original = btn.textContent;
+              btn.textContent = label;
+              btn.classList.add('arm');
+
+              setTimeout(function () {
+                if (btn.getAttribute('data-arm') === '1') {
+                  btn.removeAttribute('data-arm');
+                  btn.classList.remove('arm');
+                  btn.textContent = original;
+                }
+              }, 6000);
+            }
+
             list.addEventListener('click', function (ev) {
               var t0 = ev.target;
               if (!t0 || !t0.closest) return;
+
+              // 全部 / 隐藏 / 回收站 三个视图切换
+              var f = t0.closest('.wp-f');
+              if (f) {
+                var next = f.getAttribute('data-f') || 'all';
+                if (next === view) return;
+                view = next;
+                if (lastState) render(lastState);
+                return;
+              }
+
+              // 隐藏：不弹确认，随时能恢复
+              var hb = t0.closest('.wp-hide');
+              if (hb) {
+                hb.disabled = true;
+                call('api/hide?id=' + encodeURIComponent(hb.getAttribute('data-id'))).then(render);
+                return;
+              }
+
+              // 删除：搬到回收站，要确认一次
+              var db = t0.closest('.wp-del');
+              if (db) {
+                wpArm(db, '确认删除?', function () {
+                  call('api/delete?id=' + encodeURIComponent(db.getAttribute('data-id'))).then(render);
+                });
+                return;
+              }
+
+              // 隐藏项恢复
+              var ub = t0.closest('.wp-unhide');
+              if (ub) {
+                wpArm(ub, '确认恢复?', function () {
+                  call('api/unhide?key=' + encodeURIComponent(ub.getAttribute('data-key'))).then(render);
+                });
+                return;
+              }
+
+              // 回收站：还原单条
+              var rb = t0.closest('.wp-restore');
+              if (rb) {
+                wpArm(rb, '确认还原?', function () {
+                  call('api/restore?key=' + encodeURIComponent(rb.getAttribute('data-key'))).then(render);
+                });
+                return;
+              }
+
+              // 回收站：彻底删除（真删文件）
+              var pb = t0.closest('.wp-purge');
+              if (pb) {
+                wpArm(pb, '确认彻底删除?', function () {
+                  call('api/purge?key=' + encodeURIComponent(pb.getAttribute('data-key'))).then(render);
+                });
+                return;
+              }
 
               // 「我的」页的工具条：加文件夹 / 重扫 / 打开目录 / 移除某个目录
               if (t0.closest('.wp-adddir')) {
@@ -1624,10 +1807,11 @@ internal sealed class AlifeBackground
                 return;
               }
 
-              var btn = t0.closest('.wp-item');
-              if (!btn) return;
+              // 只有正文区域（缩略图 + 标题）才切壁纸；右侧的动作按钮不能触发切换
+              var pick = t0.closest('.wp-pick[data-id]');
+              if (!pick) return;
 
-              call('api/switch?id=' + encodeURIComponent(btn.getAttribute('data-id'))).then(render);
+              call('api/switch?id=' + encodeURIComponent(pick.getAttribute('data-id'))).then(render);
             });
 
             // 面板不透明度单独还原（WallpaperConfig.WidgetPanelOpacity 默认 55）
@@ -1657,9 +1841,10 @@ internal sealed class AlifeBackground
 
             if (tabList) {
               tabList.addEventListener('click', function () {
-                if (!propsOpen && !mineOpen) return;
+                if (!propsOpen && !mineOpen && view === 'all') return;
                 propsOpen = false;
                 mineOpen = false;
+                view = 'all';
                 refresh();
               });
             }
@@ -1667,9 +1852,10 @@ internal sealed class AlifeBackground
             // 我的：自己导入的图片 / 视频单独一页
             if (tabMine) {
               tabMine.addEventListener('click', function () {
-                if (mineOpen) return;
+                if (mineOpen && view === 'all') return;
                 propsOpen = false;
                 mineOpen = true;
+                view = 'all';
                 refresh();
               });
             }
@@ -1679,6 +1865,7 @@ internal sealed class AlifeBackground
                 if (propsOpen) return;
                 propsOpen = true;
                 mineOpen = false;
+                view = 'all';
                 refresh();
               });
             }
@@ -1940,7 +2127,13 @@ internal sealed class AlifeBackground
         """;
 
     readonly ILogger logger;
-    BrowserWindow? main;
+
+    /// <summary>
+    /// 页面脚本执行器。Alife 5.0 起没有 Electron 窗口，只能由 GlobalUI 组件
+    /// 通过 IJSRuntime 提供；为空说明主界面还没挂载，注入要等下一次。
+    /// </summary>
+    internal static Func<string, Task<string>>? JsRunner;
+
     string? currentKey;
 
     public AlifeBackground(ILogger logger) => this.logger = logger;
@@ -1952,8 +2145,7 @@ internal sealed class AlifeBackground
         {
             try
             {
-                main ??= await FindMainWindowAsync();
-                if (main == null)
+                if (JsRunner == null)
                 {
                     await Task.Delay(300);
                     continue;
@@ -1964,7 +2156,6 @@ internal sealed class AlifeBackground
             }
             catch
             {
-                main = null;
                 await Task.Delay(300);
             }
         }
@@ -2050,7 +2241,7 @@ internal sealed class AlifeBackground
             }
             catch
             {
-                main = null;
+                // 页面还没准备好：下面重新 Attach 后再试一轮
             }
 
             await Task.Delay(300);
@@ -2063,7 +2254,7 @@ internal sealed class AlifeBackground
     /// <summary>只刷新样式（遮罩 / 面板 / 模糊），不重建媒体元素，挂件拖滑块时用。</summary>
     public async Task RestyleAsync(WallpaperConfig config)
     {
-        if (main == null) return;
+        if (JsRunner == null) return;
 
         string payload = JsonSerializer.Serialize(new
         {
@@ -2094,7 +2285,7 @@ internal sealed class AlifeBackground
     /// <summary>重新挂载场景（实时渲染退回预览图时用它救回来，不用切壁纸）。</summary>
     public async Task<string> RemountSceneAsync()
     {
-        if (main == null) return "no-window";
+        if (JsRunner == null) return "no-window";
 
         const string js = """
             (function () {
@@ -2126,7 +2317,7 @@ internal sealed class AlifeBackground
     /// <summary>在页面里跑一段 JS（只由 127.0.0.1 的 /api/eval 调用，用于本机排查）。</summary>
     public async Task<string> EvalAsync(string script)
     {
-        if (main == null) return "no-window";
+        if (JsRunner == null) return "no-window";
 
         try { return await ExecuteAsync(script); }
         catch (Exception ex) { return "ERR: " + ex.Message; }
@@ -2138,7 +2329,7 @@ internal sealed class AlifeBackground
     /// </summary>
     public async Task<string> SceneDiagAsync()
     {
-        if (main == null) return "{\"ok\":false,\"error\":\"主窗口未就绪\"}";
+        if (JsRunner == null) return "{\"ok\":false,\"error\":\"主窗口未就绪\"}";
 
         const string probe = """
             (function () {
@@ -2189,7 +2380,7 @@ internal sealed class AlifeBackground
     /// <summary>把页面上“浅色不透明”的元素列出来，供 /api/dom 排查（只在本机回环上暴露）。</summary>
     public async Task<string> DumpDomAsync()
     {
-        if (main == null) return "";
+        if (JsRunner == null) return "";
 
         try
         {
@@ -2205,7 +2396,7 @@ internal sealed class AlifeBackground
     public async Task ClearAsync(bool keepWidget = false)
     {
         currentKey = null;
-        if (main == null) return;
+        if (JsRunner == null) return;
 
         string arg = keepWidget ? "true" : "false";
 
@@ -2218,7 +2409,7 @@ internal sealed class AlifeBackground
     public async Task<string> ApplyPropsAsync(Dictionary<string, object?> props)
     {
         if (props.Count == 0) return "";
-        if (main == null) return "no-window";
+        if (JsRunner == null) return "no-window";
 
         string json = JsonSerializer.Serialize(props);
 
@@ -2237,7 +2428,7 @@ internal sealed class AlifeBackground
     /// <summary>音量 / 静音 / 倍速这类只影响媒体元素的参数，不重建壁纸层，直接改。</summary>
     public async Task ApplyMediaAsync(WallpaperConfig config)
     {
-        if (main == null) return;
+        if (JsRunner == null) return;
 
         string payload = JsonSerializer.Serialize(new
         {
@@ -2252,7 +2443,7 @@ internal sealed class AlifeBackground
 
     public async Task<bool> IsLayerAliveAsync()
     {
-        if (main == null) return false;
+        if (JsRunner == null) return false;
 
         try
         {
@@ -2269,47 +2460,11 @@ internal sealed class AlifeBackground
 
     async Task<string> ExecuteAsync(string script)
     {
-        if (main == null) throw new InvalidOperationException("主窗口未就绪");
+        var runner = JsRunner;
 
-        try
-        {
-            return await main.WebContents.ExecuteJavaScriptAsync<string>(script, true) ?? "";
-        }
-        catch
-        {
-            // 页面重载 / 窗口重建后句柄可能失效，下次重新查找
-            main = null;
-            throw;
-        }
-    }
+        if (runner == null) throw new InvalidOperationException("主窗口未就绪");
 
-    static async Task<BrowserWindow?> FindMainWindowAsync()
-    {
-        for (int attempt = 0; attempt < 40; attempt++)
-        {
-            try
-            {
-                var windows = Electron.WindowManager.BrowserWindows;
-                foreach (BrowserWindow window in windows)
-                {
-                    string title = await window.GetTitleAsync();
-                    if (string.Equals(title, "Alife", StringComparison.OrdinalIgnoreCase))
-                        return window;
-                }
-
-                // 兜底：主窗口最先创建，Id 最小
-                if (windows.Count > 0)
-                    return windows.OrderBy(w => w.Id).First();
-            }
-            catch
-            {
-                // Electron 尚未就绪 / 窗口正在销毁
-            }
-
-            await Task.Delay(250);
-        }
-
-        return null;
+        return await runner(script) ?? "";
     }
 
     /// <summary>找场景壁纸的 scene.pkg（Wallpaper Engine 项目里固定叫这个名）。</summary>
