@@ -13,7 +13,7 @@
 | presents.GalMode | GalMode | https://github.com/presents0721/presents.GalMode |
 | presents.QQSuite | QQSuite | https://github.com/presents0721/presents.QQSuite |
 | presents.RawHtml | RawHtml | https://github.com/presents0721/presents.RawHtml |
-| presents.Video | 视频理解 | https://github.com/presents0721/presents.Video |
+| presents.Video | 视频理解 | https://github.com/presents0721/presents.VideoAnalyzer |
 | presents.Vision.Qwen3VL | Qwen3-VL视觉分析 | https://github.com/presents0721/presents.Vision.Qwen3VL |
 | presents.Wallpaper | 壁纸 | https://github.com/presents0721/presents.Wallpaper |
 
