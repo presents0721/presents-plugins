@@ -1,0 +1,9 @@
+{
+  "Id": "presents.PluginTestKit",
+  "Name": "Alife 插件测试框架",
+  "Description": "给插件作者用的自检套件：静态结构检查、JS 注入脚本 DOM 桩测试、配置迁移防覆盖测试、热重载泄漏回归、可插拔的 Tests/*.test.cjs 用例，以及本地测试报告面板与 AI 工具。",
+  "Version": "5.0.0",
+  "Dependencies": {
+    "Alife.Function.FunctionCaller": ""
+  }
+}
