@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alife 插件测试框架</title>
+<style>
+:root{--bg:#0d1018;--panel:#161b28;--panel2:#1c2231;--line:#2a3348;--text:#e4e9f2;--dim:#8b96ab;--acc:#6ea8ff;--ok:#4ec9a0;--warn:#f0b562;--bad:#f07373}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+header{display:flex;align-items:center;gap:14px;padding:16px 24px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#171d2c,#111622);flex-wrap:wrap}
+h1{font-size:18px;margin:0;font-weight:600}.tag{font-size:11px;color:var(--dim);border:1px solid var(--line);padding:2px 8px;border-radius:20px}
+.spacer{flex:1}button{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 14px;cursor:pointer;transition:.15s}button:hover{border-color:var(--acc);background:#24314a}button.primary{background:#2b4a7a;border-color:#4a7fd0}button:disabled{opacity:.5;cursor:not-allowed}
+main{padding:20px 24px;max-width:1400px;margin:0 auto}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:18px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}.card .k{font-size:11px;color:var(--dim)}.card .v{font-size:26px;font-weight:650;margin-top:4px;font-variant-numeric:tabular-nums}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.acc{color:var(--acc)}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:14px}
+.box h2{font-size:14px;margin:0 0 12px;font-weight:600}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+select,input{font:inherit;background:#0f1420;color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 10px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #232b3d;vertical-align:top}th{color:var(--dim);font-weight:500}
+tbody tr:hover{background:#1c2436}.scroll{max-height:600px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.chip{display:inline-block;font-size:10.5px;padding:1px 8px;border-radius:20px;background:#25314a;color:#a8c4f2;margin-right:4px}
+.chip.ok{background:#1d4236;color:#8ee0bf}.chip.bad{background:#482727;color:#ffaaaa}.chip.warn{background:#463722;color:#f0c078}
+pre{background:#0f1420;border:1px solid var(--line);border-radius:8px;padding:10px;font:12px/1.6 Consolas,monospace;white-space:pre-wrap;word-break:break-all;margin:6px 0 0}
+.muted{color:var(--dim)}.empty{padding:30px;text-align:center;color:var(--dim)}
+.toast{position:fixed;right:20px;bottom:20px;background:#22304a;border:1px solid var(--acc);border-radius:10px;padding:11px 16px;opacity:0;transition:.25s;pointer-events:none;z-index:9}.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>Alife 插件测试框架</h1>
+  <span class="tag" id="status">就绪</span>
+  <span class="spacer"></span>
+  <label class="muted" style="font-size:12px">分类
+    <select id="filter"><option value="">全部</option><option>结构</option><option>JS</option><option>配置迁移</option><option>热重载</option></select>
+  </label>
+  <label class="muted" style="font-size:12px"><input type="checkbox" id="onlyBad" style="min-width:auto"> 只看异常</label>
+  <button id="run" class="primary">运行全部自检</button>
+  <button id="open">新窗口打开</button>
+</header>
+<main>
+  <div class="row" style="margin-top:10px;flex-wrap:wrap">
+  <input id="oneName" placeholder="插件 id，如 presents.OpsSuite" style="min-width:240px;flex:1;max-width:340px">
+  <button id="runOne">单插件快测</button>
+  <button id="compare">对比最近两次</button>
+  <button id="uismoke">面板冒烟</button>
+  <span class="muted" style="font-size:12px">快测不落盘；面板冒烟会用浏览器真打开每个面板，约 20 秒</span>
+</div>
+<div id="uiBox" style="font-size:12.5px;margin-top:6px"></div>
+<div id="oneBox" style="font-size:12.5px;margin-top:6px"></div>
+<div id="diffBox" style="font-size:12.5px;margin-top:6px"></div>
+
+<div class="cards" id="cards"></div>
+  <div class="box">
+    <h2>测试结果 <small class="muted" id="meta"></small></h2>
+    <div class="row"><select id="history" style="min-width:240px"><option value="">最近一次报告</option></select><span class="muted">报告保存在 Storage/PluginTestKit/Reports/</span></div>
+    <div class="scroll"><table><thead><tr><th style="width:90px">状态</th><th style="width:110px">分类</th><th style="width:170px">范围</th><th>检查项</th><th style="width:70px" class="num">耗时</th></tr></thead><tbody id="rows"></tbody></table></div>
+  </div>
+  <div class="box">
+    <h2>自定义用例</h2>
+    <div class="muted">在任意插件目录建 <code>Tests/*.test.cjs</code>，框架会自动发现并在 Node + DOM 桩里执行。可用全局：<code>test(name, fn)</code>、<code>assert(cond, msg)</code>、<code>assertEqual(a,b)</code>、<code>assertThrows(fn)</code>、<code>document</code>、<code>window</code>。</div>
+    <pre>test('挂件不会留下遮挡层', () => {
+  const box = document.createElement('div');
+  box.id = 'my-widget';
+  document.body.appendChild(box);
+  assert(document.getElementById('my-widget'), '挂件应被创建');
+  box.remove();
+  assert(!document.getElementById('my-widget'), '清理后不应残留');
+});</pre>
+  </div>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+const $=(s)=>document.querySelector(s);
+const esc=(s)=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api=async(p,o)=>{try{const r=await fetch(p,o);return await r.json()}catch(e){return {ok:false,error:String(e)}}};
+const toast=(t)=>{const e=$('#toast');e.textContent=t;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),3200)};
+let report=null, reports=[];
+function cards(r){
+  const d=[['检查项',r?.total??0,''],['通过',r?.passed??0,'ok'],['失败',r?.failed??0,'bad'],['提示',r?.warnings??0,'warn'],['耗时',(r?.durationMs??0)+' ms','']];
+  $('#cards').innerHTML=d.map(([k,v,c])=>`<div class="card"><div class="k">${k}</div><div class="v ${c}">${v}</div></div>`).join('');
+  $('#meta').textContent=r?`${r.at} · ${r.summary}`:'';
+  $('#status').textContent=r?(r.failed?'有失败项':'自检通过'):'尚未运行';
+}
+function render(){
+  if(!report){$('#rows').innerHTML='<tr><td colspan="5" class="empty">点「运行全部自检」开始</td></tr>';return}
+  const f=$('#filter').value, bad=$('#onlyBad').checked;
+  let rows=(report.results||[]).filter(x=>(!f||x.category===f)&&(!bad||!x.passed));
+  $('#rows').innerHTML=rows.length?rows.map(x=>{
+    const cls=x.passed?'ok':(x.warning?'warn':'bad'), label=x.passed?'通过':(x.warning?'提示':'失败');
+    const details=(x.details||[]).length?`<pre>${esc(x.details.join('\n'))}</pre>`:'';
+    return `<tr><td><span class="chip ${cls}">${label}</span></td><td><span class="chip">${esc(x.category)}</span></td><td class="muted" style="word-break:break-all">${esc(x.scope)}</td>
+      <td><b>${esc(x.name)}</b>${x.message?`<div class="muted">${esc(x.message)}</div>`:''}${details}</td><td class="num muted">${x.durationMs}ms</td></tr>`;
+  }).join(''):'<tr><td colspan="5" class="empty">当前筛选下没有结果</td></tr>';
+}
+async function load(name=''){
+  const r=await api('/api/report'+(name?'?name='+encodeURIComponent(name):''));
+  if(r&&r.results){report=r;cards(r);render()}
+}
+async function refreshState(){
+  const s=await api('/api/state');
+  reports=s.reports||[];
+  $('#history').innerHTML='<option value="">最近一次报告</option>'+reports.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join('');
+  if(s.latest){cards(s.latest)}
+  $('#status').textContent=s.running?'测试中…':($('#status').textContent||'就绪');
+  $('#run').disabled=!!s.running;
+}
+$('#filter').onchange=render;$('#onlyBad').onchange=render;
+$('#history').onchange=()=>load($('#history').value);
+$('#run').onclick=async()=>{
+  $('#run').disabled=true;$('#status').textContent='测试中…';toast('自检开始，可能需要十几秒');
+  const r=await api('/api/run',{method:'POST'});
+  if(!r.ok){toast('运行失败：'+(r.error||''))}else{toast(`${r.summary}`)}
+  await refreshState();await load();$('#run').disabled=false;
+};
+
+// 单插件快测：只扫一个目录、不写报告，改完插件几秒内就能知道有没有明显问题
+$('#runOne').onclick=async()=>{
+  const name=$('#oneName').value.trim();
+  if(!name){toast('先填插件 id，例如 presents.OpsSuite');return}
+  $('#runOne').disabled=true;
+  const t0=Date.now();
+  const r=await api('/api/run?plugin='+encodeURIComponent(name),{method:'POST'});
+  const ms=Date.now()-t0;
+  $('#runOne').disabled=false;
+  $('#oneBox').innerHTML=r.ok
+    ? `<span class="chip ${r.failed?'bad':(r.warnings?'warn':'ok')}">单插件快测</span> <b>${esc(name)}</b> · ${r.total} 项 · 失败 ${r.failed} · 提示 ${r.warnings} · ${ms} ms · <span class="muted">${r.saved?'已落盘':'未落盘'}</span>`
+    : `<span class="chip bad">快测失败</span> ${esc(r.error||'')}`;
+};
+
+// 回归对比：最近两份报告对齐，直接看有没有这次改出来的新失败
+$('#compare').onclick=async()=>{
+  const d=await api('/api/compare');
+  if(!d.summary){$('#diffBox').innerHTML=`<span class="chip warn">无法对比</span> ${esc(d.error||'')}`;return}
+  const list=(arr,mark)=>arr.length?`<div style="margin-top:4px">${arr.slice(0,12).map(x=>`<div class="muted">${mark} ${esc(x)}</div>`).join('')}</div>`:'';
+  $('#diffBox').innerHTML=
+    `<span class="chip ${d.newFailures.length?'bad':'ok'}">回归对比</span> ${esc(d.baseAt)} → ${esc(d.latestAt)}：<b>${esc(d.summary)}</b>`+
+    `<span class="muted"> · 新失败 ${d.newFailures.length} · 修复 ${d.fixed.length} · 仍失败 ${d.stillFailing.length} · 新增项 ${d.added.length}</span>`+
+    list(d.newFailures,'✗')+list(d.fixed,'✓')+
+    (d.newFailures.length?'':'<div class="muted" style="margin-top:3px">这次改动没有引入新失败</div>');
+};
+// 面板冒烟：真浏览器打开每个本地面板抓 JS 报错。字段名对不上、函数被变量遮蔽这类问题，
+// 静态检查永远发现不了 —— 语法没错、接口也返回 200，只是页面白着。
+$('#uismoke').onclick=async()=>{
+  const b=$('#uismoke');
+  b.disabled=true;b.textContent='检查中…';
+  $('#uiBox').innerHTML='<span class="muted">正在用浏览器逐个打开面板，约 20 秒…</span>';
+
+  const r=await api('/api/uismoke',{method:'POST'});
+  b.disabled=false;b.textContent='面板冒烟';
+
+  if(!r||r.ok===false){
+    $('#uiBox').innerHTML=`<span class="chip warn">无法运行</span> ${esc((r&&r.error)||'')}`;
+    return;
+  }
+
+  const rows=(r.results||[]).map(x=>{
+    const cls=x.passed?'ok':(x.warning?'warn':'bad');
+    const label=x.passed?'通过':(x.warning?'提示':'失败');
+    const ds=(x.details||[]).slice(0,3)
+      .map(d=>`<div class="muted" style="margin-left:52px">· ${esc(d)}</div>`).join('');
+    return `<div><span class="chip ${cls}">${label}</span> <span class="mono">${esc(x.scope)}</span> ${esc(x.message)}</div>${ds}`;
+  }).join('');
+
+  $('#uiBox').innerHTML=`<div style="margin-bottom:4px"><b>${r.count} 个面板</b> · ${r.failed} 个有报错</div>${rows}`;
+};
+
+$('#open').onclick=()=>window.open(location.href,'_blank');
+refreshState().then(()=>load());
+setInterval(refreshState,8000);
+</script>
+</body>
+</html>
